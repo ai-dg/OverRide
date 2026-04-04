@@ -1,0 +1,51 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+int main(void)
+{
+	FILE *f;
+	char pass_buf[48];
+	char line_user[112];
+	char line_pass[256];
+	size_t nread;
+
+	memset(line_user, 0, sizeof(line_user));
+	memset(pass_buf, 0, sizeof(pass_buf));
+	memset(line_pass, 0, sizeof(line_pass));
+
+	f = fopen("/home/users/level03/.pass", "r");
+	if (f == NULL) {
+		fwrite("ERROR: failed to open password file\n", 1, 0x24, stderr);
+		exit(1);
+	}
+	nread = fread(pass_buf, 1, 0x29, f);
+	pass_buf[strcspn(pass_buf, "\n")] = '\0';
+	if (nread != 0x29) {
+		fwrite("ERROR: failed to read password file\n", 1, 0x24, stderr);
+		fwrite("ERROR: failed to read password file\n", 1, 0x24, stderr);
+		exit(1);
+	}
+	fclose(f);
+
+	puts("===== [ Secure Access System v1.0 ] =====");
+	puts("/***************************************\\");
+	puts("| You must login to access this system. |");
+	puts("\\**************************************/");
+	printf("--[ Username: ");
+	fgets(line_user, 100, stdin);
+	line_user[strcspn(line_user, "\n")] = '\0';
+	printf("--[ Password: ");
+	fgets(line_pass, 100, stdin);
+	line_pass[strcspn(line_pass, "\n")] = '\0';
+	puts("*****************************************");
+	if (strncmp(pass_buf, line_pass, 0x29) == 0) {
+		printf("Greetings, %s!\n", line_user);
+		system("/bin/sh");
+		return 0;
+	}
+	printf(line_user);
+	puts(" does not have access!");
+	exit(1);
+}

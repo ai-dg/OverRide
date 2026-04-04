@@ -1,0 +1,21 @@
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void)
+{
+	int password;
+
+	puts("***********************************");
+	puts("* \t     -Level00 -\t\t  *");
+	puts("***********************************");
+	printf("Password:");
+	/* format en .rodata : "%d" — scanf lit un entier 32 bits sur la pile */
+	scanf("%d", &password);
+	if (password != 0x149c) {
+		puts("\nInvalid Password!");
+		return 1;
+	}
+	puts("\nAuthenticated!");
+	system("/bin/sh");
+	return 0;
+}

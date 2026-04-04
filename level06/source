@@ -1,0 +1,68 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/ptrace.h>
+
+unsigned int auth(char *login, unsigned int serial)
+{
+	size_t len;
+	uint32_t hash;
+	size_t i;
+	int32_t ch;
+	uint32_t ecx;
+	uint64_t prod;
+	uint32_t hi;
+	uint32_t eax;
+
+	login[strcspn(login, "\n")] = '\0';
+	len = strlen(login);
+	if (len > 0x20)
+		len = 0x20;
+	if (len <= 5)
+		return 1;
+	if (ptrace(PTRACE_TRACEME, 0, NULL, NULL) == -1) {
+		puts("\x1b[32m.---------------------------.");
+		puts("\x1b[31m| !! TAMPERING DETECTED !!  |");
+		puts("\x1b[32m'--------------------------'");
+		return 1;
+	}
+	hash = ((unsigned char)login[3] ^ 0x1337u) + 0x5eeded;
+	for (i = 0; i < len; i++) {
+		ch = (signed char)login[i];
+		if (ch <= 0x1f)
+			return 1;
+		ecx = (uint32_t)ch ^ hash;
+		prod = (uint64_t)ecx * 0x88233b2bULL;
+		hi = (uint32_t)(prod >> 32);
+		eax = ecx - hi;
+		eax = (eax >> 1) + hi;
+		eax >>= 10;
+		eax *= 0x539;
+		hash += ecx - eax;
+	}
+	return serial != hash;
+}
+
+int main(void)
+{
+	char login[32];
+	unsigned int serial;
+
+	puts("***********************************");
+	puts("*\t\tlevel06\t\t  *");
+	puts("***********************************");
+	printf("-> Enter Login: ");
+	fgets(login, sizeof(login), stdin);
+	puts("***********************************");
+	puts("***** NEW ACCOUNT DETECTED ********");
+	puts("***********************************");
+	printf("-> Enter Serial: ");
+	scanf("%u", &serial);
+	if (auth(login, serial) == 0) {
+		puts("Authenticated!");
+		system("/bin/sh");
+	}
+	return 0;
+}

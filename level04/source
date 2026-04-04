@@ -1,0 +1,44 @@
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <sys/ptrace.h>
+#include <sys/prctl.h>
+#include <signal.h>
+
+/* Le binaire utilise gets() (non borné) — non déclaré en C11 strict */
+extern char *gets(char *s);
+
+int main(void)
+{
+	pid_t pid;
+	int status;
+	char buf[128];
+	long orig_eax;
+
+	memset(buf, 0, sizeof(buf));
+	pid = fork();
+	if (pid == 0) {
+		prctl(PR_SET_PDEATHSIG, SIGHUP);
+		ptrace(PTRACE_TRACEME, 0, NULL, NULL);
+		puts("Give me some shellcode, k");
+		gets(buf);
+	} else {
+		while (1) {
+			wait(&status);
+			if (WIFEXITED(status)) {
+				puts("child is exiting...");
+				return 0;
+			}
+			/* PTRACE_PEEKUSER, orig_eax (i386) = 0x2c */
+			orig_eax = ptrace(PTRACE_PEEKUSER, pid, 0x2c, NULL);
+			if (orig_eax == 0xb)
+				break;
+		}
+		puts("no exec() for you");
+		kill(pid, SIGKILL);
+	}
+	return 0;
+}

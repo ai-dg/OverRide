@@ -1,0 +1,63 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+void decrypt(int x); /* définition dans le binaire */
+
+/*
+ * test(b - a) : saut via table (0..0x15) vers decrypt(x),
+ * sinon decrypt(rand()).
+ */
+void test(unsigned int a, unsigned int b)
+{
+	unsigned int d;
+	int idx;
+
+	d = b - a;
+	if (d > 0x15) {
+		decrypt(rand());
+		return;
+	}
+	idx = (int)d;
+	switch (idx) {
+	case 0:  decrypt(idx); break;
+	case 1:  decrypt(idx); break;
+	case 2:  decrypt(idx); break;
+	case 3:  decrypt(idx); break;
+	case 4:  decrypt(idx); break;
+	case 5:  decrypt(idx); break;
+	case 6:  decrypt(idx); break;
+	case 7:  decrypt(idx); break;
+	case 8:  decrypt(idx); break;
+	case 9:  decrypt(idx); break;
+	case 10: decrypt(idx); break;
+	case 11: decrypt(idx); break;
+	case 12: decrypt(idx); break;
+	case 13: decrypt(idx); break;
+	case 14: decrypt(idx); break;
+	case 15: decrypt(idx); break;
+	case 16: decrypt(idx); break;
+	case 17: decrypt(idx); break;
+	case 18: decrypt(idx); break;
+	case 19: decrypt(idx); break;
+	case 20: decrypt(idx); break;
+	case 21: decrypt(idx); break;
+	default:
+		decrypt(rand());
+		break;
+	}
+}
+
+int main(void)
+{
+	unsigned int input;
+
+	srand((unsigned)time(NULL));
+	puts("***********************************");
+	puts("*\t\tlevel03\t\t**");
+	puts("***********************************");
+	printf("Password:");
+	scanf("%u", &input);
+	test(input, 0x1337d00d);
+	return 0;
+}

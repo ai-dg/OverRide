@@ -1,0 +1,91 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+unsigned int get_unum(void)
+{
+	unsigned int v;
+
+	fflush(stdout);
+	scanf("%u", &v);
+	return v;
+}
+
+unsigned int store_number(unsigned int *tab)
+{
+	unsigned int n;
+	unsigned int idx;
+
+	printf(" Number: ");
+	n = get_unum();
+	printf(" Index: ");
+	idx = get_unum();
+	/* index % 3 == 0 OU octet fort == 0xb7 => refus (voir mul 0xaaaaaaab) */
+	if (idx % 3 == 0 || (n >> 24) == 0xb7) {
+		puts(" *** ERROR! ***");
+		puts("   This index is reserved for wil!");
+		puts(" *** ERROR! ***");
+		return 1;
+	}
+	tab[idx] = n;
+	return 0;
+}
+
+unsigned int read_number(unsigned int *tab)
+{
+	unsigned int idx;
+
+	printf(" Index: ");
+	idx = get_unum();
+	printf(" Number at data[%u] is %u\n", idx, tab[idx]);
+	return 0;
+}
+
+int main(int argc, char **argv, char **envp)
+{
+	unsigned int storage[100];
+	char cmd[20];
+	int ret;
+	char **p;
+	int i;
+
+	(void)argc;
+	for (p = argv; *p != NULL; p++)
+		memset(*p, 0, strlen(*p));
+	for (p = envp; *p != NULL; p++)
+		memset(*p, 0, strlen(*p));
+	for (i = 0; i < 100; i++)
+		storage[i] = 0;
+	puts(
+	    "----------------------------------------------------\n"
+	    "  Welcome to wil's crappy number storage service!   \n"
+	    "----------------------------------------------------\n"
+	    " Commands:                                          \n"
+	    "    store - store a number into the data storage    \n"
+	    "    read  - read a number from the data storage     \n"
+	    "    quit  - exit the program                        \n"
+	    "----------------------------------------------------\n"
+	    "   wil has reserved some storage :>                 \n"
+	    "----------------------------------------------------\n");
+	for (;;) {
+		printf("Input command: ");
+		fflush(stdout);
+		fgets(cmd, sizeof(cmd), stdin);
+		cmd[strcspn(cmd, "\n")] = '\0';
+		if (strncmp(cmd, "store", 5) == 0)
+			ret = store_number(storage);
+		else if (strncmp(cmd, "read", 4) == 0)
+			ret = read_number(storage);
+		else if (strncmp(cmd, "quit", 4) == 0)
+			break;
+		else
+			continue;
+		if (ret == 0)
+			printf(" Completed %s command successfully\n", cmd);
+		else
+			printf(" Failed to do %s command\n", cmd);
+		memset(cmd, 0, sizeof(cmd));
+	}
+	return 0;
+}

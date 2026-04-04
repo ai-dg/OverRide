@@ -1,0 +1,22 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void)
+{
+	char buf[100];
+	size_t i;
+	size_t lim;
+
+	fgets(buf, sizeof(buf), stdin);
+	/* strlen puis -1 : boucle sur indices 0 .. len-2 (voir disassembly) */
+	lim = strlen(buf);
+	if (lim > 0)
+		lim--;
+	for (i = 0; i < lim; i++) {
+		if (buf[i] > '@' && buf[i] <= 'Z')
+			buf[i] ^= 0x20;
+	}
+	printf(buf);
+	exit(0);
+}

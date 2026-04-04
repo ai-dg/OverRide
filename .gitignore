@@ -1,0 +1,10 @@
+*.iso
+.cursor/
+# Binaires OverRide (ne pas versionner — analyse locale)
+level*/level[0-9][0-9]
+level*/level*.bin
+level*/*.bin
+bonus0/*.bin
+bonus1/*.bin
+bonus*/bonus*
+*.bin
