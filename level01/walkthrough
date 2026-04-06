@@ -1,1 +1,95 @@
-printf 'dat_wil\nadmin\n' | ./level01
+# Level01 — Walkthrough (OverRide)
+
+## 1. Objective
+
+Obtain a shell as the next user (or read `/home/users/level02/.pass`) by turning the vulnerable binary into arbitrary code execution. **A correct interactive login is not enough** to finish the level: there is **no** `system`, **no** `exec*`, and a successful password check only leads to `main` returning `0` (see §3).
+
+## 2. What the binary really does (static picture)
+
+- **Username** is read into the **global** `a_user_name` (`fgets(..., 0x100, stdin)`), then compared to **`dat_wil`** (7 bytes) in `verify_user_name`.
+- **Password** is read into a **stack** buffer at `esp+0x1c` (`fgets(..., 0x64, stdin)` = up to **99** characters + NUL), then compared to **`admin`** (5 bytes) in `verify_user_pass`.
+- **Imports** (GOT/PLT): `printf`, `fgets`, `puts`, `__libc_start_main` only — **no `system`**, no shell hidden behind “success”.
+- So the **strings** `dat_wil` and `admin` are the real reference secrets for the compares, but **finishing the project** requires abusing memory corruption, not expecting an interactive shell after typing them.
+
+## 3. Why `dat_wil` / `admin` alone “fail” (your GDB)
+
+You showed:
+
+- After `verify_user_pass`, **`$eax == 0`** with input **`admin`** → the 5-byte compare **succeeds**.
+- Then `main` does `cmpl $0, 0x5c(%esp)` and **`je 0x8048597`**, which prepares **`puts`** with **`0x804871e`** → the **“incorrect password”** message.
+
+So for **return value 0**, control flows to the **failure** `puts`. The **success** block at **`0x80485aa`** (`xor eax,eax` / return 0 from `main`) is only reachable through a **second** `je` that you never hit in the **`eax == 0`** case. In practice:
+
+- Typing the “right” password still prints the **wrong-password** line.
+- Even if you forced execution to **`0x80485aa`**, **`main` would only return 0** — still **no shell**.
+
+Conclusion: the **real** bug to exploit is **not** the boolean outcome of `verify_user_pass`, but **what happens on the stack** when the **password line is long**.
+
+## 4. Vulnerability (real primitive)
+
+- `fgets` into the **password** buffer allows **up to 99 bytes** into a region that lives in a **`sub $0x60, %esp`** frame with the buffer starting at **`esp+0x1c`**.
+- The **intended** object is a small local array; **99 bytes** of input **overflow** past the end of that local block and **clobber** saved registers / saved **`ebp`** / **return address** (exact layout: measure in GDB — do not guess from the simplified `source` alone).
+
+This is a **classic stack buffer overflow** on the **second line** of input (after a valid username line).
+
+## 5. Exploit design
+
+1. **Line 1:** `dat_wil` + newline — pass `verify_user_name` so execution reaches the password `fgets`.
+2. **Line 2:** a crafted password “line” that:
+   - Keeps the **first 5 bytes** equal to **`admin`** so `verify_user_pass` still returns **0** (optional but avoids changing control flow before `main` reuses the stack slot — you can also explore overflow that breaks `verify`; the reliable approach is to keep the prefix **`admin`** for the first 5 bytes).
+   - Adds padding out to the **saved EIP** offset (pattern / cyclic).
+   - Overwrites **saved EIP** with a **ret2libc** chain (or ROP) to call **`system("/bin/sh")`** using **`system`**, **`exit`**, and **`"/bin/sh"`** addresses from **your** libc (VM-dependent).
+
+**There is no `system@plt`** in this binary: you need **`system`** resolved in **`libc.so.6`** (attach once, `print system`, `find` `/bin/sh`, or use your subject’s libc).
+
+## 6. GDB — measure the offset (mandatory)
+
+Reproducible sequence (on the VM, ASLR may need to be disabled for repeatability — subject-dependent):
+
+```text
+gdb -q ./level01
+```
+
+**A. Cyclic pattern in the password line**
+
+- Run, enter `dat_wil`, then a long pattern (e.g. `pattern_create 200` from peda/gef, or a De Bruijn string) as the password line.
+- When it crashes: `pattern_offset $eip` (or read EIP in the fault frame).
+
+**B. Confirm relationship buffer → EIP**
+
+- Break after password `fgets` (`break *0x08048579` or equivalent on your build).
+- `x/40wx $esp`, note the buffer address and where saved **EIP** lives for **this** build.
+
+Record the **exact offset** in `commands.md` (and here in your notes).
+
+## 7. Build the payload (logic)
+
+- Let **`OFF`** = offset from **first byte of the password buffer** to **saved EIP** (found in §6).
+- libc addresses: **`SYSTEM`**, **`EXIT`**, **`BINSH`** (32-bit little-endian `struct.pack('<I', addr)`).
+- Second line bytes (conceptually):
+
+```text
+"admin" + [padding to OFF] + p32(SYSTEM) + p32(EXIT) + p32(BINSH) + "\n"
+```
+
+Adjust if you keep a newline earlier in the line; **re-measure** so the **overwrite** still lands on **EIP**.
+
+**Environment / alignment:** i386, **NX** and **ASLR** on the VM change what is allowed (ret2libc vs ROP vs leak). Follow your ISO and your teacher’s constraints.
+
+## 8. Reproducible exploit command (template)
+
+The **exact** `python2`/`python3` one-liner with numeric addresses belongs in **`commands.md`** once you have **`OFF`**, **`SYSTEM`**, **`EXIT`**, **`BINSH`** from GDB on the **evaluation VM**.
+
+Template shape:
+
+```bash
+( python3 -c 'import struct,sys; sys.stdout.buffer.write(b"dat_wil\n"+b"admin"+"A"*(OFF-5)+struct.pack("<III",SYSTEM,EXIT,BINSH)+b"\n")' ) | ./level01
+```
+
+Replace **`OFF`**, **`SYSTEM`**, **`EXIT`**, **`BINSH`** with **your** values; re-run until you get a stable shell, then read **`/home/users/level02/.pass`** (or `su level02`).
+
+## 9. Oral defense (short)
+
+- **Bug:** unbounded effect of **`fgets`** into an undersized stack buffer for the password line.
+- **Why login is a red herring:** no **`system`** in the binary; **`admin`** validates in **`verify_user_pass`** but **`main`** still branches to the failure **`puts`** on **`eax == 0`**, and “success” would only **`return 0`** anyway.
+- **Fix:** use **`fgets`** with **`sizeof(buf)-1`**, ensure **`sizeof(buf)`** matches allocation, stack canaries, **PIE/NX** as appropriate, or **`read`** with explicit length checks.
