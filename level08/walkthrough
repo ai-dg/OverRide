@@ -1,1 +1,80 @@
-python3 -c "import os; p=b'A'*292; os.execve('./level08',[b'./level08',p],os.environ)"
+# Level08 -- Walkthrough (evaluation)
+
+## 1. Objectif
+
+Lire le fichier `/home/users/level09/.pass` pour obtenir le mot de passe du level suivant.
+
+## 2. Comportement du programme
+
+Le binaire `level08` est un utilitaire de **backup** :
+1. Ouvre **`./backups/.log`** en ecriture
+2. `fopen(argv[1], "r")` : ouvre le fichier passe en argument **avec les droits du binaire** (setuid level09)
+3. `strncat(outpath, argv[1], ...)` : construit le chemin de sortie **`./backups/<argv[1]>`**
+4. `open(outpath, ...)` : cree le fichier de backup
+5. Boucle `fgetc` / `write` : copie octet par octet
+
+## 3. Protections
+
+| Protection | Etat | Impact |
+|-----------|------|--------|
+| **Canary** | Oui | Empeche le stack overflow dans `log_wrapper` (strcpy) |
+| **NX** | Desactive | Sans objet ici (pas d'injection de code) |
+| **PIE** | Non | Adresses fixes, mais pas exploite par cette voie |
+| **Full RELRO** | Oui | GOT en lecture seule, pas de GOT overwrite |
+| **Setuid** | level09 | Le binaire lit des fichiers avec les droits de level09 |
+
+## 4. Vulnerabilite : traversee de chemin via symlink
+
+Le programme fait confiance a `argv[1]` pour deux choses :
+- **Lecture** : `fopen(argv[1], "r")` avec les privileges setuid
+- **Ecriture** : `open("./backups/" + argv[1], ...)` dans le repertoire courant
+
+Si on passe directement `/home/users/level09/.pass`, le chemin de sortie devient `./backups//home/users/level09/.pass` -- les sous-repertoires n'existent pas, donc `open` echoue.
+
+**Solution** : creer un **lien symbolique** avec un nom simple (ex. `token`) qui pointe vers le fichier cible. Le programme :
+- `fopen("token", "r")` → suit le symlink → lit `/home/users/level09/.pass` (droits setuid)
+- `open("./backups/token", ...)` → chemin simple → cree le fichier avec succes
+- Copie le contenu → le mot de passe se retrouve dans `./backups/token`
+
+## 5. Exploit (reproductible)
+
+```bash
+mkdir -p /tmp/lvl08/backups
+cd /tmp/lvl08
+ln -sf /home/users/level09/.pass token
+~/level08 token
+cat ./backups/token
+```
+
+## 6. Schema
+
+```
+  argv[1] = "token"
+       |
+       v
+  fopen("token", "r")
+       |
+       | (symlink)
+       v
+  /home/users/level09/.pass   <-- lu avec droits setuid
+       |
+       | (copie octet par octet)
+       v
+  ./backups/token              <-- fichier local lisible
+       |
+       v
+  cat ./backups/token => mot de passe
+```
+
+## 7. Pourquoi le strcpy n'est pas la bonne voie
+
+Le source montre un `strcpy(buf, prefix)` dans `log_wrapper` qui est techniquement un overflow. Cependant :
+- Il y a un **stack canary** (`%fs:0x28`) → tout debordement est detecte avant le `ret`
+- Le prefixe est une chaine fixe ("Starting back up: ") suivie de `argv[1]` via `strncat` borne
+- Meme sans canary, **Full RELRO** empeche le GOT overwrite
+
+La vraie vulnerabilite est la **confiance dans le chemin** combine avec le **setuid** : le programme est un lecteur de fichier privilegies sans verification adequate du chemin source.
+
+## 8. Conclusion (oral)
+
+Le level08 n'est pas un classique memory corruption. C'est un **abus de privilege** : le binaire setuid lit n'importe quel fichier accessible a level09, et le recopie dans un repertoire local. Le seul obstacle est que le chemin de sortie (`./backups/<argv[1]>`) doit etre creeable. Un **symlink** resout ce probleme : nom court pour le chemin de sortie, contenu reel pointe par le lien. La protection memoire (canary) rend le `strcpy` inexploitable, mais la logique metier du programme est la faille.

