@@ -1,0 +1,1 @@
+( printf '5276\n' ; cat ) | ./level00

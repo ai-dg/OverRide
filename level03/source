@@ -2,6 +2,16 @@
 #include <stdlib.h>
 #include <time.h>
 
+/*
+ * Vulnerability / attack surface (English):
+ * - No stack overflow in main; security depends on reverse-engineering decrypt() and
+ *   choosing input so d = 0x1337d00d - input is in 0..0x15 (fixed switch cases), or
+ *   dealing with decrypt(rand()) when d > 0x15 (srand(time(NULL)) makes that branch
+ *   time-dependent).
+ * - Unsigned subtraction d = b - a wraps if a > b; then d is huge, so the random branch
+ *   is taken — unintended control flow, harder deterministic exploit without the right input.
+ */
+
 void decrypt(int x); /* définition dans le binaire */
 
 /*
@@ -13,9 +23,9 @@ void test(unsigned int a, unsigned int b)
 	unsigned int d;
 	int idx;
 
-	d = b - a;
+	d = b - a; /* unsigned integer wrap if a > b → unintended branch */
 	if (d > 0x15) {
-		decrypt(rand());
+		decrypt(rand()); /* weak path: time-seeded PRNG */
 		return;
 	}
 	idx = (int)d;
@@ -58,6 +68,6 @@ int main(void)
 	puts("***********************************");
 	printf("Password:");
 	scanf("%u", &input);
-	test(input, 0x1337d00d);
+	test(input, 0x1337d00d); /* logic / crypto: d = 0x1337d00d − input selects decrypt */
 	return 0;
 }

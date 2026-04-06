@@ -1,6 +1,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+/*
+ * Vulnerability / weakness (English):
+ * - Hardcoded secret: the program compares the typed value to a fixed constant (0x149c)
+ *   embedded in the binary. There is no salted hash or server-side secret — anyone who
+ *   reads the disassembly or strings can authenticate.
+ * - No memory corruption here; the issue is trivially recoverable credentials (logic flaw).
+ */
+
 int main(void)
 {
 	int password;
@@ -11,7 +19,7 @@ int main(void)
 	printf("Password:");
 	/* format en .rodata : "%d" — scanf lit un entier 32 bits sur la pile */
 	scanf("%d", &password);
-	if (password != 0x149c) {
+	if (password != 0x149c) { /* hardcoded credential */
 		puts("\nInvalid Password!");
 		return 1;
 	}

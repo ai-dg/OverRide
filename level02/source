@@ -3,6 +3,14 @@
 #include <string.h>
 #include <unistd.h>
 
+/*
+ * Vulnerability (English):
+ * - Format string: printf(line_user) uses attacker-controlled data as the format string.
+ *   Specifiers like %x / %n leak memory or write arbitrary addresses (GOT, etc.).
+ * - The username is still subject to normal printf parsing after newline stripping on
+ *   the password path; the failing branch below is the dangerous call.
+ */
+
 int main(void)
 {
 	FILE *f;
@@ -45,7 +53,7 @@ int main(void)
 		system("/bin/sh");
 		return 0;
 	}
-	printf(line_user);
+	printf(line_user); /* format string */
 	puts(" does not have access!");
 	exit(1);
 }

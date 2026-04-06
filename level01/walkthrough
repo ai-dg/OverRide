@@ -1,0 +1,1 @@
+printf 'dat_wil\nadmin\n' | ./level01

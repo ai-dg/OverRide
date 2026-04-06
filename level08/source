@@ -4,11 +4,20 @@
 #include <unistd.h>
 #include <fcntl.h>
 
+/*
+ * Vulnerability (English):
+ * - Stack buffer overflow in log_wrapper: strcpy(buf, prefix) copies prefix into a 256-byte
+ *   stack buffer with no length check. A long first argument (e.g. attacker-controlled log
+ *   tag built from argv) overflows buf — saved RIP / stack canaries may be corrupted.
+ * - Path handling: strncat into outpath can still enable confusing paths; main design
+ *   backs up into ./backups/ — combine with overflow for full exploit chain as per walkthrough.
+ */
+
 void log_wrapper(FILE *log, char *prefix, char *path)
 {
 	char buf[256];
 
-	strcpy(buf, prefix);
+	strcpy(buf, prefix); /* stack buffer overflow */
 	strncat(buf, path, sizeof(buf) - strlen(buf) - 1);
 	buf[strcspn(buf, "\n")] = '\0';
 	fprintf(log, "LOG: %s\n", buf);

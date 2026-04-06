@@ -1,6 +1,15 @@
 #include <stdio.h>
 #include <string.h>
 
+/*
+ * Vulnerability / weakness (English):
+ * - Plaintext credentials in .rodata: username prefix ("dat_wil") and password ("admin")
+ *   are compared with memcmp against fixed strings in the binary — recoverable with
+ *   strings(1) / objdump, no hashing.
+ * - No buffer overflow in the reconstructed logic: fgets bounds match the buffers.
+ *   The security failure is static, guessable authentication material in the executable.
+ */
+
 char a_user_name[256];
 
 /*
@@ -10,12 +19,12 @@ char a_user_name[256];
 int verify_user_name(void)
 {
 	puts("verifying username....");
-	return memcmp(a_user_name, "dat_wil", 7);
+	return memcmp(a_user_name, "dat_wil", 7); /* static credential (binary leak) */
 }
 
 int verify_user_pass(char *pass)
 {
-	return memcmp(pass, "admin", 5);
+	return memcmp(pass, "admin", 5); /* static credential (binary leak) */
 }
 
 int main(void)

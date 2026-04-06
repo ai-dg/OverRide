@@ -1,0 +1,6 @@
+./level07 <<'EOF'
+store
+<number>
+<index>
+quit
+EOF

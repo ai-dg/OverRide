@@ -3,6 +3,15 @@
 #include <string.h>
 #include <unistd.h>
 
+/*
+ * Vulnerability (English):
+ * - Out-of-bounds read/write on storage[]: store_number and read_number use the user
+ *   supplied index without checking 0 <= idx < 100. Large idx (or index*4 overflow in
+ *   the real binary’s addressing) allows arbitrary-ish relative writes/reads on the stack.
+ * - Weak guards (index % 3 == 0 and (n >> 24) == 0xb7) do not enforce array bounds.
+ * - argv and environ strings are wiped — fewer accidental leaks, but the numeric bug remains.
+ */
+
 unsigned int get_unum(void)
 {
 	unsigned int v;
@@ -22,13 +31,13 @@ unsigned int store_number(unsigned int *tab)
 	printf(" Index: ");
 	idx = get_unum();
 	/* index % 3 == 0 OU octet fort == 0xb7 => refus (voir mul 0xaaaaaaab) */
-	if (idx % 3 == 0 || (n >> 24) == 0xb7) {
+	if (idx % 3 == 0 || (n >> 24) == 0xb7) { /* incomplete bounds check */
 		puts(" *** ERROR! ***");
 		puts("   This index is reserved for wil!");
 		puts(" *** ERROR! ***");
 		return 1;
 	}
-	tab[idx] = n;
+	tab[idx] = n; /* out-of-bounds write */
 	return 0;
 }
 
@@ -38,7 +47,7 @@ unsigned int read_number(unsigned int *tab)
 
 	printf(" Index: ");
 	idx = get_unum();
-	printf(" Number at data[%u] is %u\n", idx, tab[idx]);
+	printf(" Number at data[%u] is %u\n", idx, tab[idx]); /* out-of-bounds read */
 	return 0;
 }
 

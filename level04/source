@@ -11,6 +11,14 @@
 /* Le binaire utilise gets() (non borné) — non déclaré en C11 strict */
 extern char *gets(char *s);
 
+/*
+ * Vulnerability (English):
+ * - Stack buffer overflow: gets(buf) reads unlimited input into a 128-byte stack buffer.
+ *   There is no bounds checking — EIP/saved state can be overwritten (ret2libc, ROP, etc.).
+ * - The parent process uses ptrace to block execve (syscall 11); shellcode that execs
+ *   a shell is killed — exploit design must work around that (e.g. return-oriented code).
+ */
+
 int main(void)
 {
 	pid_t pid;
@@ -24,7 +32,7 @@ int main(void)
 		prctl(PR_SET_PDEATHSIG, SIGHUP);
 		ptrace(PTRACE_TRACEME, 0, NULL, NULL);
 		puts("Give me some shellcode, k");
-		gets(buf);
+		gets(buf); /* stack buffer overflow */
 	} else {
 		while (1) {
 			wait(&status);

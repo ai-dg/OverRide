@@ -2,6 +2,17 @@
 #include <string.h>
 
 /*
+ * Vulnerability (English):
+ * - Structure layout + off-by-one: set_username copies with i <= 0x28 (41 iterations if
+ *   non-NUL), but username[] only holds 40 bytes (valid indices 0..39). The 41st byte
+ *   overruns into msg_max (at +0xb4). That corrupts the length passed to strncpy in
+ *   set_msg → strncpy can copy far more than sizeof(msg) — classic heap/stack adjacent-field
+ *   overflow (here: overflow of msg into following memory depending on layout).
+ * - strncpy does not NUL-terminate if the source is longer than the count; secondary issues
+ *   possible depending on later use (binary-specific).
+ */
+
+/*
  * Structure du message (voir handle_msg / set_msg) :
  * - strncpy écrit jusqu'à msg_max octets à partir du début (0 .. 0x8b)
  * - nom d'utilisateur copié à l'offset 0x8c (boucle <= 0x28)
@@ -22,7 +33,7 @@ void set_username(t_msg *m)
 	puts(">: Enter your username");
 	printf(">>: ");
 	fgets(line, sizeof(line), stdin);
-	for (i = 0; i <= 0x28 && line[i]; i++)
+	for (i = 0; i <= 0x28 && line[i]; i++) /* off-by-one → corrupts msg_max */
 		m->username[i] = line[i];
 	printf(">: Welcome, %s", m->username);
 }
@@ -35,7 +46,7 @@ void set_msg(t_msg *m)
 	puts(">: Msg @Unix-Dude");
 	printf(">>: ");
 	fgets(line, sizeof(line), stdin);
-	strncpy(m->msg, line, (size_t)m->msg_max);
+	strncpy(m->msg, line, (size_t)m->msg_max); /* buffer overflow (bogus count) */
 }
 
 void handle_msg(void)

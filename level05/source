@@ -2,6 +2,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+/*
+ * Vulnerability (English):
+ * - Format string: printf(buf) treats user input as a format string after optional case
+ *   folding of 'A'..'Z'. Attackers can use % specifiers to read stack/GOT or write via %n.
+ * - exit(0) after printf prevents returning into a corrupted stack frame; overwriting GOT
+ *   entries for functions called before exit is a typical goal.
+ */
+
 int main(void)
 {
 	char buf[100];
@@ -17,6 +25,6 @@ int main(void)
 		if (buf[i] > '@' && buf[i] <= 'Z')
 			buf[i] ^= 0x20;
 	}
-	printf(buf);
+	printf(buf); /* format string */
 	exit(0);
 }
