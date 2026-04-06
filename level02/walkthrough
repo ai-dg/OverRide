@@ -1,1 +1,25 @@
-python3 -c "import sys; sys.stdout.buffer.write(b'<FORMAT_STRING>\n'+b'wrong\n')" | ./level02
+# Level02 — Walkthrough (short)
+
+## Objective
+
+Reach **`printf(line_user)`** with a **format string** in `line_user` (wrong password branch), then **leak** / **write** (e.g. GOT) to get code execution. Success path (`strncmp` OK) gives a shell via `system("/bin/sh")` but requires the real **41-byte** password from `.pass` — the intended student path is usually the **format string** on failure.
+
+## VM: no `python3`
+
+Like level01, the OverRide VM often has **`python` / `python2` only**. See **`commands.md`** for working one-liners.
+
+## Reproducible command (shape)
+
+Pipe **two lines**: username (format payload) + password (wrong). Example **recon** leak:
+
+```bash
+( python -c "import sys; sys.stdout.write('%p.'*30+'\n'+'wrong\n')" ) | ./level02
+```
+
+**Success looks like:** a dump of **`0x....`** pointers, then **` does not have access!`** — that is **expected** (wrong-password path + `printf` format leak). It is **not** the final shell exploit.
+
+**Do not** leave the literal text `<FORMAT_STRING>` in the command.
+
+The **final** payload (`%n`, GOT addresses, **8-byte** little-endian words on x86-64) belongs in **`commands.md`** after GDB.
+
+**“Pas encore” after `%p` dump:** that output **is** a successful first step. Next: find **`POS`** with **`AAAA%POS$p`** (see **`commands.md` § “After recon”**), then GOT **`%n`** writes + libc — until then you will **not** get a shell.
