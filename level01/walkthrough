@@ -78,15 +78,11 @@ Adjust if you keep a newline earlier in the line; **re-measure** so the **overwr
 
 ## 8. Reproducible exploit command (template)
 
-The **exact** `python2`/`python3` one-liner with numeric addresses belongs in **`commands.md`** once you have **`OFF`**, **`SYSTEM`**, **`EXIT`**, **`BINSH`** from GDB on the **evaluation VM**.
+Put the **exact** command with **numeric** offsets and libc addresses in **`commands.md`** after GDB.
 
-Template shape:
+**VM:** many OverRide images have **`python` / `python2` only** — **`python3` is not installed**. Use **`python -c '...'`** and **`sys.stdout.write(...)`** (Python 2). Do not use a one-liner with undefined names like `OFF` or `SYSTEM` — use integers (e.g. `80`, `0xb7ec60c0`) or assign them inside the script.
 
-```bash
-( python3 -c 'import struct,sys; sys.stdout.buffer.write(b"dat_wil\n"+b"admin"+"A"*(OFF-5)+struct.pack("<III",SYSTEM,EXIT,BINSH)+b"\n")' ) | ./level01
-```
-
-Replace **`OFF`**, **`SYSTEM`**, **`EXIT`**, **`BINSH`** with **your** values; re-run until you get a stable shell, then read **`/home/users/level02/.pass`** (or `su level02`).
+See **`commands.md`** for Python 2 vs 3 and **`cat payload.bin`** alternatives.
 
 ## 9. Oral defense (short)
 
