@@ -1,0 +1,207 @@
+# Level07 - Walkthrough
+
+## Overview
+
+The binary `level07` is a "number storage service" that lets you store and read numbers in an array. The vulnerability is that the `store_number` function does not check if the index is within the array bounds, allowing us to write to arbitrary memory locations on the stack. We exploit this to perform a **ret2libc** attack — overwriting the return address of `main` to call `system("/bin/sh")`.
+
+---
+
+## Step 1: Understanding the Binary
+
+When we run `./level07`, we get a menu with three commands:
+- `store` — asks for a number and an index, then stores the number in an array
+- `read` — asks for an index and prints the number stored there
+- `quit` — exits the program
+
+We disassemble the binary using GDB to understand what it does internally:
+
+```
+(gdb) disas main
+(gdb) disas store_number
+(gdb) disas read_number
+```
+
+### What `main` does:
+1. Sets up a **stack canary** (a security value at `esp+0x1cc` used to detect buffer overflows).
+2. Initializes an array of **100 integers** (400 bytes) at `esp+0x24`, all set to zero.
+3. **Wipes `argv` and `envp`** — loops through all command-line arguments and environment variables, zeroing them with `memset`. This prevents us from passing shellcode through the environment or arguments.
+4. Enters a loop: reads a command (`store`, `read`, or `quit`), dispatches to the appropriate function, and repeats.
+
+### What `store_number` does:
+1. Prompts for a **number** and an **index**.
+2. Performs two security checks before storing:
+   - **Check 1:** If `index % 3 == 0`, the store is rejected.
+   - **Check 2:** If the top byte of the number equals `0xb7` (i.e., `number >> 24 == 0xb7`), the store is rejected. This is meant to block libc addresses which typically start with `0xb7...`.
+3. If both checks pass, it stores: `array[index] = number` (specifically, it writes the number at address `array_base + index * 4`).
+4. **Critical flaw:** There is **no bounds check** on the index. The index is treated as an unsigned integer, so we can provide very large indices to write far beyond the array, including over the saved return address of `main`.
+
+### What `read_number` does:
+1. Prompts for an **index**.
+2. Prints the value at `array[index]` (i.e., the 4 bytes at `array_base + index * 4`).
+3. Also has **no bounds check**, which lets us read any value on the stack.
+
+---
+
+## Step 2: Mapping the Stack Layout
+
+From `main`'s disassembly, we know:
+- The array starts at `esp + 0x24`.
+- The stack canary is stored at `esp + 0x1cc`.
+
+We compute the offset from the array base to the canary:
+
+```
+canary offset = 0x1cc - 0x24 = 0x1a8 = 424 bytes
+424 / 4 = 106 (in 4-byte int-sized slots)
+```
+
+So **index 106** in the array corresponds to the stack canary.
+
+### Why this matters:
+The stack canary is checked before `main` returns. If it has been modified, the program calls `__stack_chk_fail` and aborts. We need to **not overwrite** the canary, or overwrite it with its original value.
+
+---
+
+## Step 3: Finding the Saved Return Address (EIP)
+
+The saved return address (EIP) is what the CPU will jump to when `main` returns. If we overwrite it, we control where execution goes.
+
+We can't compute its exact index statically because `main` uses `and $0xfffffff0, %esp` which aligns the stack pointer, making the distance between `esp` and `ebp` vary at runtime.
+
+So we use `read_number` to probe the stack and find it empirically. We look for a value that looks like a libc address (since `main` was called by `__libc_start_main`):
+
+```
+Input command: read
+ Index: 114
+ Number at data[114] is 4158936339
+```
+
+Converting to hex: `4158936339 = 0xF7E45513` — this is a libc address, confirming **index 114 is the saved EIP**.
+
+We also check nearby indices to confirm:
+- **Index 115** = 1 (this will be `system`'s return address, i.e., argc)
+- **Index 116** = `0xFFFFD254` (a stack address, argv pointer)
+
+---
+
+## Step 4: The ret2libc Attack Plan
+
+### What is ret2libc?
+Normally, to exploit a buffer overflow, you might inject shellcode and jump to it. But modern protections like **NX (No-Execute)** mark the stack as non-executable, so we can't run code on the stack.
+
+A **ret2libc** attack bypasses this by overwriting the return address to point to an existing function in libc — specifically `system()` — and setting up the stack so it receives `"/bin/sh"` as its argument. When `main` returns, it "calls" `system("/bin/sh")` and gives us a shell.
+
+### Stack layout we need at the moment `main` returns:
+
+```
+Index 114:  address of system()      ← main returns HERE
+Index 115:  anything (return addr after system, we don't care)
+Index 116:  address of "/bin/sh"     ← argument to system()
+```
+
+When `main` executes `ret`, it pops index 114 into EIP and jumps to `system`. The `system` function then sees index 116 as its first argument (the string pointer), following the x86 calling convention.
+
+---
+
+## Step 5: Finding libc Addresses
+
+We need two addresses from libc:
+1. The address of the `system()` function.
+2. The address of the string `"/bin/sh"` (which exists inside libc).
+
+In GDB, we load the binary, set a breakpoint, and run to ensure libc is loaded:
+
+```
+(gdb) file /home/users/level07/level07
+(gdb) b main
+(gdb) r
+(gdb) p system
+$1 = {<text variable, no debug info>} 0xf7e6aed0 <system>
+(gdb) find &system,+9999999, "/bin/sh"
+0xf7f897ec
+```
+
+**Results:**
+- `system()` is at `0xf7e6aed0` → in decimal: **4159090384**
+- `"/bin/sh"` is at `0xf7f897ec` → in decimal: **4160264172**
+
+---
+
+## Step 6: Bypassing the Index Check
+
+We need to write to index **114**, but `114 % 3 == 0`, so `store_number` will reject it.
+
+### The integer overflow trick:
+The index is multiplied by 4 (`shl $0x2, %eax`) to compute the byte offset. This multiplication is done in 32-bit arithmetic, which means it wraps around at `2^32`.
+
+We need to find a value `N` such that:
+1. `N * 4` wraps around and equals `114 * 4 = 456` (mod 2^32)
+2. `N % 3 != 0` (passes the filter)
+
+The formula is: `N = 114 + 2^30 = 114 + 1073741824 = 1073741938`
+
+**Verification:**
+- `1073741938 * 4 = 4294967752`, and `4294967752 mod 2^32 = 456` ✓ (same as `114 * 4`)
+- `1073741938 % 3 = 1` ✓ (not zero, passes the filter)
+
+### Why does this work?
+When the CPU computes `1073741938 * 4`, the result exceeds the maximum 32-bit unsigned value (`2^32 = 4294967296`). The hardware silently discards the overflow, and we're left with `456` — exactly the same byte offset as index 114. The program writes to the same memory location, but the modulo-3 check sees a different number.
+
+---
+
+## Step 7: The Value Check (`0xb7`)
+
+The second check in `store_number` rejects values whose top byte is `0xb7`. Our values are:
+- `system` = `0xf7e6aed0` — top byte is `0xf7`, **not** `0xb7` ✓
+- `"/bin/sh"` = `0xf7f897ec` — top byte is `0xf7`, **not** `0xb7` ✓
+
+Both pass the check, so no additional bypass is needed here.
+
+---
+
+## Step 8: Executing the Exploit
+
+```
+level07@OverRide:~$ ./level07
+```
+
+### Store the address of `system()` at index 114 (via overflow):
+```
+Input command: store
+ Number: 4159090384
+ Index: 1073741938
+```
+
+### Store the address of `"/bin/sh"` at index 116:
+```
+Input command: store
+ Number: 4160264172
+ Index: 116
+```
+
+### Trigger the exploit:
+```
+Input command: quit
+```
+
+When we type `quit`, `main` returns. The CPU pops our overwritten return address (`system`) into EIP, jumps to `system()`, which reads its argument from the stack (`"/bin/sh"`) and opens a shell:
+
+```
+$ whoami
+level08
+$ cat /home/users/level08/.pass
+```
+
+This gives us the password for level08.
+
+---
+
+## Summary
+
+| Concept | How it was used |
+|---|---|
+| **No bounds check** | `store_number` and `read_number` accept any index, letting us read/write anywhere on the stack relative to the array |
+| **Stack reading** | Used `read_number` to locate the saved EIP at index 114 and confirm the canary at index 106 |
+| **ret2libc** | Overwrote the return address with `system()` and placed `"/bin/sh"` as its argument, bypassing NX protection |
+| **Integer overflow** | Used index `1073741938` instead of `114` to bypass the `index % 3 == 0` restriction while targeting the same memory |
+| **GDB** | Used to find the runtime addresses of `system()` and the `"/bin/sh"` string in libc |
