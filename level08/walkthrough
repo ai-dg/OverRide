@@ -1,42 +1,97 @@
-# Level08 -- Walkthrough (evaluation)
+# Level08 — Walkthrough
 
-## 1. Objectif
+## Overview
 
-Lire le fichier `/home/users/level09/.pass` pour obtenir le mot de passe du level suivant.
+The `level08` binary is a setuid backup utility that copies a file into a `./backups/` directory. The vulnerability is not a memory corruption — the `strcpy` in `log_wrapper` is protected by a stack canary. Instead, we exploit a **path traversal via symlink**: the program reads any file accessible to `level09` (thanks to setuid) and writes it to a local path we control.
 
-## 2. Comportement du programme
+---
 
-Le binaire `level08` est un utilitaire de **backup** :
-1. Ouvre **`./backups/.log`** en ecriture
-2. `fopen(argv[1], "r")` : ouvre le fichier passe en argument **avec les droits du binaire** (setuid level09)
-3. `strncat(outpath, argv[1], ...)` : construit le chemin de sortie **`./backups/<argv[1]>`**
-4. `open(outpath, ...)` : cree le fichier de backup
-5. Boucle `fgetc` / `write` : copie octet par octet
+## Step 1: Run the binary and observe its behavior
 
-## 3. Protections
+```
+level08@OverRide:~$ ./level08
+Usage: ./level08 filename
+```
 
-| Protection | Etat | Impact |
-|-----------|------|--------|
-| **Canary** | Oui | Empeche le stack overflow dans `log_wrapper` (strcpy) |
-| **NX** | Desactive | Sans objet ici (pas d'injection de code) |
-| **PIE** | Non | Adresses fixes, mais pas exploite par cette voie |
-| **Full RELRO** | Oui | GOT en lecture seule, pas de GOT overwrite |
-| **Setuid** | level09 | Le binaire lit des fichiers avec les droits de level09 |
+```
+level08@OverRide:~$ ls -la ./level08
+-rwsr-s---+ 1 level09 users 12975 Oct 19  2016 level08
+```
 
-## 4. Vulnerabilite : traversee de chemin via symlink
+The binary is **setuid level09**. It takes a filename as argument, reads it, and copies its content into `./backups/<filename>`.
 
-Le programme fait confiance a `argv[1]` pour deux choses :
-- **Lecture** : `fopen(argv[1], "r")` avec les privileges setuid
-- **Ecriture** : `open("./backups/" + argv[1], ...)` dans le repertoire courant
+---
 
-Si on passe directement `/home/users/level09/.pass`, le chemin de sortie devient `./backups//home/users/level09/.pass` -- les sous-repertoires n'existent pas, donc `open` echoue.
+## Step 2: Analyze the binary protections
 
-**Solution** : creer un **lien symbolique** avec un nom simple (ex. `token`) qui pointe vers le fichier cible. Le programme :
-- `fopen("token", "r")` → suit le symlink → lit `/home/users/level09/.pass` (droits setuid)
-- `open("./backups/token", ...)` → chemin simple → cree le fichier avec succes
-- Copie le contenu → le mot de passe se retrouve dans `./backups/token`
+```
+level08@OverRide:~$ checksec ./level08
+```
 
-## 5. Exploit (reproductible)
+| Protection | Status | Impact |
+|-----------|--------|--------|
+| **Canary** | Enabled | Prevents stack overflow in `log_wrapper` |
+| **NX** | Disabled | Not relevant here (no code injection needed) |
+| **PIE** | Disabled | Fixed addresses, but not exploited this way |
+| **Full RELRO** | Enabled | GOT is read-only, no GOT overwrite possible |
+| **Setuid** | level09 | The binary reads files with level09 privileges |
+
+---
+
+## Step 3: Understand the program logic
+
+From the disassembly (`Ressources/disassembly.md`), the program does:
+
+1. Opens `./backups/.log` for writing (log file)
+2. Calls `log_wrapper(logf, "Starting back up: ", argv[1])` — writes to log
+3. Opens `argv[1]` for reading with `fopen` (uses setuid privileges)
+4. Builds output path: `strcpy(outpath, "./backups/")` then `strncat(outpath, argv[1], ...)`
+5. Creates the output file with `open(outpath, O_CREAT | O_WRONLY | O_TRUNC, 0660)`
+6. Copies content byte by byte with `fgetc` / `write`
+
+---
+
+## Step 4: Identify the vulnerability
+
+### Why a direct path fails
+
+If we try `./level08 /home/users/level09/.pass`, the output path becomes `./backups//home/users/level09/.pass`. The nested directories (`home/users/level09/`) don't exist under `./backups/`, so `open()` fails.
+
+### The symlink trick
+
+We create a **symbolic link** with a simple name (e.g., `token`) that points to the target file. The program:
+- `fopen("token", "r")` → follows the symlink → reads `/home/users/level09/.pass` (with setuid rights)
+- `open("./backups/token", ...)` → flat path → file creation succeeds
+- Copies the content → the password ends up in `./backups/token`
+
+```
+  argv[1] = "token"
+       |
+       v
+  fopen("token", "r")
+       |  (follows symlink)
+       v
+  /home/users/level09/.pass   <-- read with setuid privileges
+       |
+       |  (byte-by-byte copy)
+       v
+  ./backups/token              <-- local readable file
+```
+
+---
+
+## Step 5: Why the strcpy is not exploitable
+
+The source shows a `strcpy(buf, msg)` in `log_wrapper` that could technically overflow the 256-byte stack buffer. However:
+- A **stack canary** (`%fs:0x28`) is checked before `ret` — any overflow is detected
+- The prefix is a fixed string ("Starting back up: ") followed by `argv[1]` via bounded `snprintf`
+- Even without the canary, **Full RELRO** prevents GOT overwrite
+
+The real vulnerability is the **trust in the file path** combined with **setuid privileges**.
+
+---
+
+## Step 6: Execute the exploit
 
 ```bash
 mkdir -p /tmp/lvl08/backups
@@ -46,35 +101,25 @@ ln -sf /home/users/level09/.pass token
 cat ./backups/token
 ```
 
-## 6. Schema
+This prints the password for level09.
 
-```
-  argv[1] = "token"
-       |
-       v
-  fopen("token", "r")
-       |
-       | (symlink)
-       v
-  /home/users/level09/.pass   <-- lu avec droits setuid
-       |
-       | (copie octet par octet)
-       v
-  ./backups/token              <-- fichier local lisible
-       |
-       v
-  cat ./backups/token => mot de passe
+---
+
+## Final exploit command
+
+```bash
+mkdir -p /tmp/lvl08/backups && cd /tmp/lvl08 && ln -sf /home/users/level09/.pass token && ~/level08 token && cat ./backups/token
 ```
 
-## 7. Pourquoi le strcpy n'est pas la bonne voie
+---
 
-Le source montre un `strcpy(buf, prefix)` dans `log_wrapper` qui est techniquement un overflow. Cependant :
-- Il y a un **stack canary** (`%fs:0x28`) → tout debordement est detecte avant le `ret`
-- Le prefixe est une chaine fixe ("Starting back up: ") suivie de `argv[1]` via `strncat` borne
-- Meme sans canary, **Full RELRO** empeche le GOT overwrite
+## Key concepts
 
-La vraie vulnerabilite est la **confiance dans le chemin** combine avec le **setuid** : le programme est un lecteur de fichier privilegies sans verification adequate du chemin source.
-
-## 8. Conclusion (oral)
-
-Le level08 n'est pas un classique memory corruption. C'est un **abus de privilege** : le binaire setuid lit n'importe quel fichier accessible a level09, et le recopie dans un repertoire local. Le seul obstacle est que le chemin de sortie (`./backups/<argv[1]>`) doit etre creeable. Un **symlink** resout ce probleme : nom court pour le chemin de sortie, contenu reel pointe par le lien. La protection memoire (canary) rend le `strcpy` inexploitable, mais la logique metier du programme est la faille.
+| Concept | Role in the exploit |
+|---|---|
+| **Setuid binary** | The program reads files with `level09` privileges, not `level08` |
+| **Symbolic link (symlink)** | Redirects `fopen` to the target file while keeping a simple output path |
+| **Path traversal** | Direct paths fail because `./backups/<path>` creates nested directories; symlinks bypass this |
+| **Stack canary** | Protects `log_wrapper`'s `strcpy` from exploitation — forces us to find a logic flaw instead |
+| **Full RELRO** | GOT is read-only, eliminating another potential attack vector |
+| **Privilege escalation** | Not a memory corruption exploit — it's an abuse of the setuid file-reading capability |

@@ -1,1 +1,94 @@
+# Level00 — Walkthrough
+
+## Overview
+
+The `level00` binary asks for a password (an integer). The password is hardcoded in the binary as a constant. By disassembling the program, we can recover the constant and authenticate to get a shell.
+
+---
+
+## Step 1: Run the binary and observe its behavior
+
+```
+level00@OverRide:~$ ./level00
+***********************************
+*          -Level00 -             *
+***********************************
+Password:1234
+Invalid Password!
+```
+
+The program reads an integer and rejects wrong values. We need to find the correct one.
+
+---
+
+## Step 2: Disassemble `main` with GDB
+
+```
+level00@OverRide:~$ gdb -q ./level00
+(gdb) disas main
+```
+
+Key instructions:
+
+```asm
+0x0804869a <+86>:    call   0x80485e8 <__isoc99_scanf@plt>   ; scanf("%d", &password)
+0x0804869f <+91>:    cmpl   $0x149c,0x1c(%esp)               ; compare with 0x149c
+0x080486a7 <+99>:    jne    0x80486c2 <main+126>             ; if not equal → "Invalid"
+```
+
+The program compares the input against the constant `0x149c`.
+
+### Converting the constant
+
+```
+0x149c = 1*16^3 + 4*16^2 + 9*16 + 12 = 4096 + 1024 + 144 + 12 = 5276
+```
+
+The expected password is **5276**.
+
+---
+
+## Step 3: Verify and exploit
+
+```
+level00@OverRide:~$ ./level00
+***********************************
+*          -Level00 -             *
+***********************************
+Password:5276
+
+Authenticated!
+$ whoami
+level01
+```
+
+We get a shell as `level01`.
+
+---
+
+## Step 4: Get the flag
+
+```
+$ cat /home/users/level01/.pass
+uSq2ehEGT6c9S24zbshexZQBXUGrncxn5sD5QfGL
+```
+
+---
+
+## Final exploit command
+
+```bash
 ( printf '5276\n' ; cat ) | ./level00
+```
+
+The `cat` keeps stdin open so we can interact with the shell.
+
+---
+
+## Key concepts
+
+| Concept | Role in the exploit |
+|---|---|
+| **Hardcoded credentials** | The password `0x149c` (5276) is embedded in the binary as a constant in a `cmp` instruction |
+| **GDB disassembly** | Reading the assembly reveals the comparison value without needing the source code |
+| **No memory corruption** | This level has no buffer overflow or format string — the flaw is purely a logic/design issue |

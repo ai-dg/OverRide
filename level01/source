@@ -2,35 +2,35 @@
 #include <string.h>
 
 /*
- * Vulnerability / weakness (English):
- * - Plaintext credentials in .rodata: username prefix ("dat_wil") and password ("admin")
- *   are compared with memcmp against fixed strings in the binary — recoverable with
- *   strings(1) / objdump, no hashing.
- * - No buffer overflow in the reconstructed logic: fgets bounds match the buffers.
- *   The security failure is static, guessable authentication material in the executable.
+ * Vulnerability:
+ * 1. Hardcoded credentials: username "dat_wil" and password "admin" are compared
+ *    via repz cmpsb against fixed .rodata strings — recoverable with strings/objdump.
+ * 2. Broken password check: the two conditional jumps after verify_user_pass both
+ *    lead to the failure path regardless of the return value (compiler artifact or
+ *    intentional trap). The correct password "admin" does NOT grant access.
+ * 3. Buffer overflow: fgets reads up to 100 bytes (0x64) into a stack buffer at
+ *    esp+0x1c inside a 0x60-byte frame. This overflows past saved EBP/EIP.
+ *    Combined with the broken check, the overflow is the only viable attack vector.
+ *    Exploit: ret2libc (system + exit + "/bin/sh") at offset 80 from buffer start.
  */
 
 char a_user_name[256];
 
-/*
- * Compare 7 octets du buffer global à la chaîne en .rodata ("dat_wil").
- * Même schéma que verify_user_pass : valeur de retour style strcmp.
- */
 int verify_user_name(void)
 {
 	puts("verifying username....");
-	return memcmp(a_user_name, "dat_wil", 7); /* static credential (binary leak) */
+	return memcmp(a_user_name, "dat_wil", 7);
 }
 
 int verify_user_pass(char *pass)
 {
-	return memcmp(pass, "admin", 5); /* static credential (binary leak) */
+	return memcmp(pass, "admin", 5);
 }
 
 int main(void)
 {
 	int r;
-	char pass[100];
+	char pass[64]; /* esp+0x1c in a 0x60-byte frame */
 
 	memset(pass, 0, sizeof(pass));
 	r = 0;
@@ -43,11 +43,20 @@ int main(void)
 		return 1;
 	}
 	puts("Enter Password: ");
-	fgets(pass, 0x64, stdin);
+	fgets(pass, 0x64, stdin); /* reads 100 bytes into 64-byte buffer → overflow */
 	r = verify_user_pass(pass);
-	if (r != 0) {
+	/*
+	 * Bug: both branches below lead to the failure message.
+	 * if (r == 0) → failure; if (r != 0) → also failure.
+	 * The password check is dead code; overflow is the intended path.
+	 */
+	if (r == 0) {
 		puts("nope, incorrect password...\n");
 		return 1;
 	}
-	return 0;
+	if (r == 0) {
+		return 0;
+	}
+	puts("nope, incorrect password...\n");
+	return 1;
 }

@@ -1,1 +1,157 @@
-printf '322424845\n' | ./level03
+# Level03 — Walkthrough
+
+## Overview
+
+The binary asks for a password (an integer). It computes a key from `0x1337d00d - input`, uses it to XOR-decrypt a hidden string, and compares the result to `"Congratulations!"`. If the decryption succeeds, it spawns a shell via `system()`. By reverse-engineering the XOR cipher, we recover the key and compute the correct input.
+
+---
+
+## Step 1: Run the binary and observe its behavior
+
+```
+level03@OverRide:~$ ./level03
+***********************************
+*               level03         **
+***********************************
+Password:12345
+```
+
+The program reads an integer and exits silently if it's wrong.
+
+---
+
+## Step 2: Analyze the binary protections
+
+| Protection | Status | Impact |
+|-----------|--------|--------|
+| **Canary** | Enabled | Not relevant (no buffer overflow in the exploit path) |
+| **NX** | Enabled | Not relevant (no code injection needed) |
+| **PIE** | Disabled | Fixed addresses |
+
+---
+
+## Step 3: Disassemble `main`
+
+```
+(gdb) disas main
+```
+
+Key observations:
+- `srand(time(0))` seeds the PRNG (only used in the failure path)
+- `scanf("%u", &input)` reads an unsigned integer
+- Calls `test(input, 0x1337d00d)`
+
+The constant `0x1337d00d` (322424845 decimal) is hardcoded as the second argument.
+
+---
+
+## Step 4: Disassemble `test`
+
+```
+(gdb) disas test
+```
+
+Key observations:
+- Computes `key = 0x1337d00d - input`
+- If `key` is between 0 and 21 (inclusive), enters a jump table where **every case** calls `decrypt(key)`
+- If `key > 21`, calls `decrypt(rand())` — a random value we can't control
+
+All 22 switch cases (0–21) do the same thing: call `decrypt(key)`. We need to find which key value produces the correct decryption.
+
+---
+
+## Step 5: Disassemble `decrypt`
+
+```
+(gdb) disas decrypt
+```
+
+### The encrypted buffer
+
+The function builds a 16-byte string on the stack from 4 dwords:
+
+```
+0x757c7d51  0x67667360  0x7b66737e  0x33617c7d
+```
+
+In memory order (little-endian): `51 7d 7c 75 60 73 66 67 7e 73 66 7b 7d 7c 61 33`
+
+### The XOR decryption loop
+
+```c
+for (i = 0; i < strlen(buffer); i++)
+    buffer[i] ^= key;
+```
+
+### The comparison
+
+The decrypted result is compared against `"Congratulations!"` (at address `0x80489c3`, 17 bytes including NUL). If they match → `system("/bin/sh")`. Otherwise → `puts("Nope")`.
+
+---
+
+## Step 6: Recover the XOR key
+
+We XOR the first encrypted byte with the first expected byte:
+
+```
+encrypted[0] = 0x51 ('Q')
+expected[0]  = 0x43 ('C')    ← first char of "Congratulations!"
+
+key = 0x51 ^ 0x43 = 0x12 = 18
+```
+
+Verification with the second byte:
+
+```
+encrypted[1] = 0x7d
+expected[1]  = 0x6f ('o')
+
+0x7d ^ 0x12 = 0x6f  ✓
+```
+
+The correct key is **18**.
+
+---
+
+## Step 7: Compute the password
+
+Since `key = 0x1337d00d - input`:
+
+```
+input = 0x1337d00d - 18 = 322424845 - 18 = 322424827
+```
+
+---
+
+## Step 8: Execute the exploit
+
+```
+level03@OverRide:~$ ./level03
+***********************************
+*               level03         **
+***********************************
+Password:322424827
+$ whoami
+level04
+$ cat /home/users/level04/.pass
+```
+
+---
+
+## Final exploit command
+
+```bash
+( printf '322424827\n' ; cat ) | ./level03
+```
+
+---
+
+## Key concepts
+
+| Concept | Role in the exploit |
+|---|---|
+| **Reverse engineering** | Disassembling `main`, `test`, and `decrypt` in GDB to understand the full program flow |
+| **Switch / jump table** | `test` uses a jump table for values 0–21, all leading to `decrypt(key)` |
+| **XOR cipher** | `decrypt` XORs a hardcoded buffer byte-by-byte with the key |
+| **Known-plaintext attack** | We know the expected output (`"Congratulations!"`), so we XOR it with the ciphertext to recover the key |
+| **Integer arithmetic** | Once the key (18) is known, `input = 0x1337d00d - key` gives the password |

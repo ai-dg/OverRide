@@ -1,57 +1,56 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 /*
- * Vulnerability / attack surface (English):
- * - No stack overflow in main; security depends on reverse-engineering decrypt() and
- *   choosing input so d = 0x1337d00d - input is in 0..0x15 (fixed switch cases), or
- *   dealing with decrypt(rand()) when d > 0x15 (srand(time(NULL)) makes that branch
- *   time-dependent).
- * - Unsigned subtraction d = b - a wraps if a > b; then d is huge, so the random branch
- *   is taken — unintended control flow, harder deterministic exploit without the right input.
+ * Vulnerability:
+ * No memory corruption. Security relies on reversing the decrypt() XOR cipher.
+ * The encrypted buffer and the expected plaintext ("Congratulations!") are both
+ * in the binary. XOR key = encrypted[0] ^ expected[0] = 0x51 ^ 0x43 = 18.
+ * Since key = 0x1337d00d - input, the password is 0x1337d00d - 18 = 322424827.
  */
 
-void decrypt(int x); /* définition dans le binaire */
+void decrypt(int key)
+{
+	char buf[] = {
+		0x51, 0x7d, 0x7c, 0x75,
+		0x60, 0x73, 0x66, 0x67,
+		0x7e, 0x73, 0x66, 0x7b,
+		0x7d, 0x7c, 0x61, 0x33,
+		0x00
+	};
+	size_t len;
+	size_t i;
 
-/*
- * test(b - a) : saut via table (0..0x15) vers decrypt(x),
- * sinon decrypt(rand()).
- */
+	len = strlen(buf);
+	for (i = 0; i < len; i++)
+		buf[i] ^= key;
+	if (strncmp(buf, "Congratulations!", 17) == 0)
+		system("/bin/sh");
+	else
+		puts("Nope");
+}
+
 void test(unsigned int a, unsigned int b)
 {
 	unsigned int d;
-	int idx;
 
-	d = b - a; /* unsigned integer wrap if a > b → unintended branch */
-	if (d > 0x15) {
-		decrypt(rand()); /* weak path: time-seeded PRNG */
+	d = b - a;
+	if (d > 21) {
+		decrypt(rand());
 		return;
 	}
-	idx = (int)d;
-	switch (idx) {
-	case 0:  decrypt(idx); break;
-	case 1:  decrypt(idx); break;
-	case 2:  decrypt(idx); break;
-	case 3:  decrypt(idx); break;
-	case 4:  decrypt(idx); break;
-	case 5:  decrypt(idx); break;
-	case 6:  decrypt(idx); break;
-	case 7:  decrypt(idx); break;
-	case 8:  decrypt(idx); break;
-	case 9:  decrypt(idx); break;
-	case 10: decrypt(idx); break;
-	case 11: decrypt(idx); break;
-	case 12: decrypt(idx); break;
-	case 13: decrypt(idx); break;
-	case 14: decrypt(idx); break;
-	case 15: decrypt(idx); break;
-	case 16: decrypt(idx); break;
-	case 17: decrypt(idx); break;
-	case 18: decrypt(idx); break;
-	case 19: decrypt(idx); break;
-	case 20: decrypt(idx); break;
-	case 21: decrypt(idx); break;
+	/* Jump table: all 22 cases (0..21) call decrypt(d) */
+	switch ((int)d) {
+	case 0:  case 1:  case 2:  case 3:
+	case 4:  case 5:  case 6:  case 7:
+	case 8:  case 9:  case 10: case 11:
+	case 12: case 13: case 14: case 15:
+	case 16: case 17: case 18: case 19:
+	case 20: case 21:
+		decrypt(d);
+		break;
 	default:
 		decrypt(rand());
 		break;
@@ -68,6 +67,6 @@ int main(void)
 	puts("***********************************");
 	printf("Password:");
 	scanf("%u", &input);
-	test(input, 0x1337d00d); /* logic / crypto: d = 0x1337d00d − input selects decrypt */
+	test(input, 0x1337d00d);
 	return 0;
 }

@@ -6,13 +6,11 @@
 #include <sys/ptrace.h>
 
 /*
- * Vulnerability / weakness (English):
- * - Authentication bypass by forgery: serial is accepted if it equals a deterministic
- *   function of login (hash loop). An attacker who reimplements the algorithm offline
- *   can compute a valid serial without a leak — crypto is obfuscation, not a secret key.
- * - Anti-debug: ptrace(PTRACE_TRACEME) fails under gdb unless bypassed; that is a
- *   hurdle, not a fix for the predictable serial.
- * - login length is capped in auth (strlen / 0x20); main uses fgets(login, sizeof login).
+ * Vulnerability:
+ * Authentication bypass by serial forgery. The serial is accepted if it equals
+ * a deterministic hash of the login string. An attacker who reimplements the
+ * algorithm offline can compute a valid serial without any leak.
+ * The ptrace(PTRACE_TRACEME) anti-debug check is a hurdle, not a real fix.
  */
 
 unsigned int auth(char *login, unsigned int serial)
@@ -21,15 +19,13 @@ unsigned int auth(char *login, unsigned int serial)
 	uint32_t hash;
 	size_t i;
 	int32_t ch;
-	uint32_t ecx;
+	uint32_t xored;
 	uint64_t prod;
 	uint32_t hi;
-	uint32_t eax;
+	uint32_t tmp;
 
 	login[strcspn(login, "\n")] = '\0';
-	len = strlen(login);
-	if (len > 0x20)
-		len = 0x20;
+	len = strnlen(login, 0x20);
 	if (len <= 5)
 		return 1;
 	if (ptrace(PTRACE_TRACEME, 0, NULL, NULL) == -1) {
@@ -43,16 +39,16 @@ unsigned int auth(char *login, unsigned int serial)
 		ch = (signed char)login[i];
 		if (ch <= 0x1f)
 			return 1;
-		ecx = (uint32_t)ch ^ hash;
-		prod = (uint64_t)ecx * 0x88233b2bULL;
+		xored = (uint32_t)ch ^ hash;
+		prod = (uint64_t)xored * 0x88233b2bULL;
 		hi = (uint32_t)(prod >> 32);
-		eax = ecx - hi;
-		eax = (eax >> 1) + hi;
-		eax >>= 10;
-		eax *= 0x539;
-		hash += ecx - eax;
+		tmp = xored - hi;
+		tmp = (tmp >> 1) + hi;
+		tmp >>= 10;
+		tmp *= 0x539;
+		hash += xored - tmp;
 	}
-	return serial != hash; /* predictable serial → authentication forgery */
+	return serial != hash;
 }
 
 int main(void)

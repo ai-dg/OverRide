@@ -182,5 +182,48 @@ End of assembler dump.
 
 End of assembler dump.
 ```
+## `secret_backdoor`
 
-**Exploitation note:** Username stops at **0x28** iterations or NUL but copies into **username[]** immediately before the **length field** at **+0xb4**; overlapping writes change **strncpy** count. **strncpy** into the object is the second-stage corruption.
+```text
+(gdb) disas secret_backdoor
+   0x000000000000088c <+0>:     push   %rbp
+   0x000000000000088d <+1>:     mov    %rsp,%rbp
+   ---> Prologue.
+
+   0x0000000000000890 <+4>:     add    $0xffffffffffffff80,%rsp
+   ---> Allocate **128 bytes** (0x80) for local buffer.
+
+   0x0000000000000894 <+8>:     mov    0x20171d(%rip),%rax        # 0x201fb8
+   0x000000000000089b <+15>:    mov    (%rax),%rax
+   ---> Load **stdin** (GOT → FILE* pointer, double dereference).
+
+   0x000000000000089e <+18>:    mov    %rax,%rdx
+   ---> Third argument: **rdx = stdin**.
+
+   0x00000000000008a1 <+21>:    lea    -0x80(%rbp),%rax
+   ---> Load address of local buffer (128 bytes at rbp-0x80).
+
+   0x00000000000008a5 <+25>:    mov    $0x80,%esi
+   ---> Second argument: **size = 128**.
+
+   0x00000000000008aa <+30>:    mov    %rax,%rdi
+   ---> First argument: **rdi = buffer**.
+
+   0x00000000000008ad <+33>:    callq  0x770 <fgets@plt>
+   ---> **fgets(buffer, 128, stdin)** — read a command from user.
+
+   0x00000000000008b2 <+38>:    lea    -0x80(%rbp),%rax
+   0x00000000000008b6 <+42>:    mov    %rax,%rdi
+   ---> First argument: **rdi = buffer** (the string just read).
+
+   0x00000000000008b9 <+45>:    callq  0x740 <system@plt>
+   ---> **system(buffer)** — execute the user-supplied string as a shell command.
+
+   0x00000000000008be <+50>:    leaveq 
+   0x00000000000008bf <+51>:    retq   
+   ---> Epilogue: return.
+
+End of assembler dump.
+```
+
+**Exploitation note:** This function is **never called** by the program. It reads a string and passes it directly to `system()`. The exploit goal is to redirect execution here via the off-by-one overflow in `set_username` → corrupt `msg_len` → overflow in `set_msg` → overwrite saved RIP with the address of `secret_backdoor`.

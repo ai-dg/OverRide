@@ -4,11 +4,11 @@
 #include <unistd.h>
 
 /*
- * Vulnerability (English):
- * - Format string: printf(line_user) uses attacker-controlled data as the format string.
- *   Specifiers like %x / %n leak memory or write arbitrary addresses (GOT, etc.).
- * - The username is still subject to normal printf parsing after newline stripping on
- *   the password path; the failing branch below is the dangerous call.
+ * Vulnerability:
+ * Format string: printf(line_user) uses attacker-controlled data as the format string.
+ * Specifiers like %x / %n leak memory or write arbitrary addresses (GOT, etc.).
+ * The password from .pass is loaded on the stack before printf — it can be read
+ * directly with the right %k$p index, or one can hijack the GOT for code execution.
  */
 
 int main(void)
@@ -53,7 +53,7 @@ int main(void)
 		system("/bin/sh");
 		return 0;
 	}
-	printf(line_user); /* format string */
+	printf(line_user); /* FORMAT STRING VULNERABILITY */
 	puts(" does not have access!");
 	exit(1);
 }

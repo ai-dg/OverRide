@@ -1,28 +1,32 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /*
- * Vulnerability (English):
- * - Structure layout + off-by-one: set_username copies with i <= 0x28 (41 iterations if
- *   non-NUL), but username[] only holds 40 bytes (valid indices 0..39). The 41st byte
- *   overruns into msg_max (at +0xb4). That corrupts the length passed to strncpy in
- *   set_msg → strncpy can copy far more than sizeof(msg) — classic heap/stack adjacent-field
- *   overflow (here: overflow of msg into following memory depending on layout).
- * - strncpy does not NUL-terminate if the source is longer than the count; secondary issues
- *   possible depending on later use (binary-specific).
+ * Vulnerability:
+ * Off-by-one in set_username: the loop copies with i <= 0x28 (41 iterations),
+ * but username[] only holds 40 bytes. The 41st byte overwrites the LSB of
+ * msg_max at offset +0xb4, corrupting the length used by strncpy in set_msg.
+ * With msg_max set to 0xff (255), strncpy copies far past the msg buffer,
+ * overwriting saved RBP and saved RIP on the stack.
+ *
+ * Hidden function: secret_backdoor() reads a command via fgets and passes it
+ * to system(). Redirecting RIP to secret_backdoor gives a shell.
  */
 
-/*
- * Structure du message (voir handle_msg / set_msg) :
- * - strncpy écrit jusqu'à msg_max octets à partir du début (0 .. 0x8b)
- * - nom d'utilisateur copié à l'offset 0x8c (boucle <= 0x28)
- * - msg_max à l'offset 0xb4 (0x8c), utilisé par strncpy dans set_msg
- */
 typedef struct {
-	char msg[0x8c];
-	char username[40];
-	int msg_max; /* aligné à +0xb4 */
+	char msg[0x8c];       /* offset 0x00 - 0x8b */
+	char username[40];    /* offset 0x8c - 0xb3 */
+	int msg_max;          /* offset 0xb4        */
 } t_msg;
+
+void secret_backdoor(void)
+{
+	char buf[128];
+
+	fgets(buf, sizeof(buf), stdin);
+	system(buf);
+}
 
 void set_username(t_msg *m)
 {
@@ -33,7 +37,7 @@ void set_username(t_msg *m)
 	puts(">: Enter your username");
 	printf(">>: ");
 	fgets(line, sizeof(line), stdin);
-	for (i = 0; i <= 0x28 && line[i]; i++) /* off-by-one → corrupts msg_max */
+	for (i = 0; i <= 0x28 && line[i]; i++) /* off-by-one: writes 41 bytes */
 		m->username[i] = line[i];
 	printf(">: Welcome, %s", m->username);
 }
@@ -46,7 +50,7 @@ void set_msg(t_msg *m)
 	puts(">: Msg @Unix-Dude");
 	printf(">>: ");
 	fgets(line, sizeof(line), stdin);
-	strncpy(m->msg, line, (size_t)m->msg_max); /* buffer overflow (bogus count) */
+	strncpy(m->msg, line, (size_t)m->msg_max); /* overflow if msg_max corrupted */
 }
 
 void handle_msg(void)
@@ -54,7 +58,7 @@ void handle_msg(void)
 	t_msg m;
 
 	memset(&m, 0, sizeof(m));
-	m.msg_max = 0x8c; /* longueur strncpy (voir +0xb4 dans le binaire) */
+	m.msg_max = 0x8c;
 	set_username(&m);
 	set_msg(&m);
 	puts(">: Msg sent!");

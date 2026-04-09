@@ -129,4 +129,138 @@ End of assembler dump.
  ---> Shared exit from test().
 ```
 
-**Exploitation note:** Control **d = 0x1337d00d − input** so that **d ∈ [0,21]** hits a fixed `decrypt` case, or force the **rand** branch. Actual password comes from `decrypt()` logic (not shown here).
+## `decrypt`
+
+```text
+(gdb) disas decrypt
+   0x08048660 <+0>:     push   %ebp
+   0x08048661 <+1>:     mov    %esp,%ebp
+   ---> Prologue.
+
+   0x08048663 <+3>:     push   %edi
+   0x08048664 <+4>:     push   %esi
+   ---> Save callee-saved registers (used by repnz scasb / repz cmpsb).
+
+   0x08048665 <+5>:     sub    $0x40,%esp
+   ---> Allocate 64 bytes for locals: encrypted buffer at -0x1d, strlen result at -0x24, loop index at -0x28.
+
+   0x08048668 <+8>:     mov    %gs:0x14,%eax
+   0x0804866e <+14>:    mov    %eax,-0xc(%ebp)
+   0x08048671 <+17>:    xor    %eax,%eax
+   ---> Load **stack canary** from TLS and store at -0xc(%ebp).
+
+   0x08048673 <+19>:    movl   $0x757c7d51,-0x1d(%ebp)
+   0x0804867a <+26>:    movl   $0x67667360,-0x19(%ebp)
+   0x08048681 <+33>:    movl   $0x7b66737e,-0x15(%ebp)
+   0x08048688 <+40>:    movl   $0x33617c7d,-0x11(%ebp)
+   0x0804868f <+47>:    movb   $0x0,-0xd(%ebp)
+   ---> Build 16-byte **encrypted buffer** on the stack + NUL terminator.
+   ---> Bytes in memory order: 51 7d 7c 75 60 73 66 67 7e 73 66 7b 7d 7c 61 33 00.
+
+   0x08048693 <+51>:    push   %eax
+   0x08048694 <+52>:    xor    %eax,%eax
+   0x08048696 <+54>:    je     0x804869b <decrypt+59>
+   0x08048698 <+56>:    add    $0x4,%esp
+   0x0804869b <+59>:    pop    %eax
+   ---> Compiler stack-alignment stub (no functional effect).
+
+   0x0804869c <+60>:    lea    -0x1d(%ebp),%eax
+   ---> Load address of encrypted buffer into %eax.
+
+   0x0804869f <+63>:    movl   $0xffffffff,-0x2c(%ebp)
+   0x080486a6 <+70>:    mov    %eax,%edx
+   0x080486a8 <+72>:    mov    $0x0,%eax
+   0x080486ad <+77>:    mov    -0x2c(%ebp),%ecx
+   0x080486b0 <+80>:    mov    %edx,%edi
+   0x080486b2 <+82>:    repnz scas %es:(%edi),%al
+   0x080486b4 <+84>:    mov    %ecx,%eax
+   0x080486b6 <+86>:    not    %eax
+   0x080486b8 <+88>:    sub    $0x1,%eax
+   ---> **strlen(buffer)** via repnz scasb: scan for NUL, compute length = 16.
+
+   0x080486bb <+91>:    mov    %eax,-0x24(%ebp)
+   ---> Store **len = 16** at -0x24(%ebp).
+
+   0x080486be <+94>:    movl   $0x0,-0x28(%ebp)
+   ---> Initialize loop index **i = 0** at -0x28(%ebp).
+
+   0x080486c5 <+101>:   jmp    0x80486e5 <decrypt+133>
+   ---> Jump to loop condition check.
+
+   0x080486c7 <+103>:   lea    -0x1d(%ebp),%eax
+   0x080486ca <+106>:   add    -0x28(%ebp),%eax
+   0x080486cd <+109>:   movzbl (%eax),%eax
+   ---> Load **buffer[i]** as unsigned byte.
+
+   0x080486d0 <+112>:   mov    %eax,%edx
+   0x080486d2 <+114>:   mov    0x8(%ebp),%eax
+   0x080486d5 <+117>:   xor    %edx,%eax
+   ---> **XOR buffer[i] with the key** (first argument at 0x8(%ebp)).
+
+   0x080486d7 <+119>:   mov    %eax,%edx
+   0x080486d9 <+121>:   lea    -0x1d(%ebp),%eax
+   0x080486dc <+124>:   add    -0x28(%ebp),%eax
+   0x080486df <+127>:   mov    %dl,(%eax)
+   ---> **buffer[i] = buffer[i] ^ key** — write decrypted byte back.
+
+   0x080486e1 <+129>:   addl   $0x1,-0x28(%ebp)
+   ---> **i++**.
+
+   0x080486e5 <+133>:   mov    -0x28(%ebp),%eax
+   0x080486e8 <+136>:   cmp    -0x24(%ebp),%eax
+   0x080486eb <+139>:   jb     0x80486c7 <decrypt+103>
+   ---> Loop while **i < len** (unsigned compare).
+
+   0x080486ed <+141>:   lea    -0x1d(%ebp),%eax
+   0x080486f0 <+144>:   mov    %eax,%edx
+   0x080486f2 <+146>:   mov    $0x80489c3,%eax
+   ---> Load address of **"Congratulations!"** string from .rodata.
+
+   0x080486f7 <+151>:   mov    $0x11,%ecx
+   ---> Compare length = **17** bytes (16 chars + NUL).
+
+   0x080486fc <+156>:   mov    %edx,%esi
+   0x080486fe <+158>:   mov    %eax,%edi
+   0x08048700 <+160>:   repz cmpsb %es:(%edi),%ds:(%esi)
+   ---> **strncmp(buffer, "Congratulations!", 17)** via repz cmpsb.
+
+   0x08048702 <+162>:   seta   %dl
+   0x08048705 <+165>:   setb   %al
+   0x08048708 <+168>:   mov    %edx,%ecx
+   0x0804870a <+170>:   sub    %al,%cl
+   0x0804870c <+172>:   mov    %ecx,%eax
+   0x0804870e <+174>:   movsbl %al,%eax
+   ---> Compute strcmp-style return value: 0 if equal, positive/negative otherwise.
+
+   0x08048711 <+177>:   test   %eax,%eax
+   0x08048713 <+179>:   jne    0x8048723 <decrypt+195>
+   ---> If **not equal** → jump to "Nope" path.
+
+   0x08048715 <+181>:   movl   $0x80489d4,(%esp)
+   0x0804871c <+188>:   call   0x80484e0 <system@plt>
+   ---> **system("/bin/sh")** — decryption matched, spawn shell.
+
+   0x08048721 <+193>:   jmp    0x804872f <decrypt+207>
+   ---> Skip "Nope" path.
+
+   0x08048723 <+195>:   movl   $0x80489dc,(%esp)
+   0x0804872a <+202>:   call   0x80484d0 <puts@plt>
+   ---> **puts("Nope")** — decryption did not match.
+
+   0x0804872f <+207>:   mov    -0xc(%ebp),%esi
+   0x08048732 <+210>:   xor    %gs:0x14,%esi
+   0x08048739 <+217>:   je     0x8048740 <decrypt+224>
+   0x0804873b <+219>:   call   0x80484c0 <__stack_chk_fail@plt>
+   ---> **Stack canary check** before return.
+
+   0x08048740 <+224>:   add    $0x40,%esp
+   0x08048743 <+227>:   pop    %esi
+   0x08048744 <+228>:   pop    %edi
+   0x08048745 <+229>:   pop    %ebp
+   0x08048746 <+230>:   ret
+   ---> Epilogue: restore stack and return.
+
+End of assembler dump.
+```
+
+**Exploitation note:** The encrypted buffer XORed with key **18** (0x12) produces `"Congratulations!"`. Key 18 means `input = 0x1337d00d - 18 = 322424827`.

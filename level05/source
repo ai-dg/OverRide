@@ -3,28 +3,27 @@
 #include <string.h>
 
 /*
- * Vulnerability (English):
- * - Format string: printf(buf) treats user input as a format string after optional case
- *   folding of 'A'..'Z'. Attackers can use % specifiers to read stack/GOT or write via %n.
- * - exit(0) after printf prevents returning into a corrupted stack frame; overwriting GOT
- *   entries for functions called before exit is a typical goal.
+ * Vulnerability:
+ * Format string: printf(buf) treats user input as a format string after
+ * lowercasing A-Z (XOR 0x20). Attackers use %x/%n to read/write memory.
+ * exit(0) after printf prevents return to a corrupted frame; overwriting
+ * exit@GOT with a shellcode address is the typical exploit path.
  */
 
 int main(void)
 {
 	char buf[100];
 	size_t i;
-	size_t lim;
+	size_t len;
 
 	fgets(buf, sizeof(buf), stdin);
-	/* strlen puis -1 : boucle sur indices 0 .. len-2 (voir disassembly) */
-	lim = strlen(buf);
-	if (lim > 0)
-		lim--;
-	for (i = 0; i < lim; i++) {
+	len = strlen(buf);
+	if (len > 0)
+		len--;
+	for (i = 0; i < len; i++) {
 		if (buf[i] > '@' && buf[i] <= 'Z')
-			buf[i] ^= 0x20;
+			buf[i] ^= 0x20; /* convert uppercase to lowercase */
 	}
-	printf(buf); /* format string */
+	printf(buf); /* FORMAT STRING VULNERABILITY */
 	exit(0);
 }

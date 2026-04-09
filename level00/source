@@ -2,11 +2,10 @@
 #include <stdlib.h>
 
 /*
- * Vulnerability / weakness (English):
- * - Hardcoded secret: the program compares the typed value to a fixed constant (0x149c)
- *   embedded in the binary. There is no salted hash or server-side secret — anyone who
- *   reads the disassembly or strings can authenticate.
- * - No memory corruption here; the issue is trivially recoverable credentials (logic flaw).
+ * Vulnerability:
+ * Hardcoded secret: the program compares user input to a fixed constant (0x149c = 5276)
+ * embedded in the binary. Anyone who reads the disassembly can authenticate.
+ * No memory corruption; the issue is a trivially recoverable credential (logic flaw).
  */
 
 int main(void)
@@ -17,9 +16,8 @@ int main(void)
 	puts("* \t     -Level00 -\t\t  *");
 	puts("***********************************");
 	printf("Password:");
-	/* format en .rodata : "%d" — scanf lit un entier 32 bits sur la pile */
 	scanf("%d", &password);
-	if (password != 0x149c) { /* hardcoded credential */
+	if (password != 0x149c) {
 		puts("\nInvalid Password!");
 		return 1;
 	}

