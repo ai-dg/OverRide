@@ -30,86 +30,193 @@ The program reads an integer and exits silently if it's wrong.
 
 ---
 
-## Step 3: Disassemble `main`
+## Step 3: Disassemble `main` — find the entry point
 
 ```
 (gdb) disas main
 ```
 
-Key observations:
-- `srand(time(0))` seeds the PRNG (only used in the failure path)
-- `scanf("%u", &input)` reads an unsigned integer
-- Calls `test(input, 0x1337d00d)`
+Key instructions:
 
-The constant `0x1337d00d` (322424845 decimal) is hardcoded as the second argument.
+```asm
+0x0804886c <+18>:    movl   $0x0,(%esp)
+0x08048873 <+25>:    call   0x80484b0 <time@plt>        ← time(NULL)
+0x0804887b <+33>:    call   0x8048500 <srand@plt>       ← srand(time(0))
+```
+
+The PRNG is seeded but only used in the **failure path** (when key > 21).
+
+```asm
+0x080488b1 <+87>:    mov    $0x8048a85,%eax             ← "%u" format string
+0x080488c1 <+103>:   call   0x8048530 <scanf@plt>       ← scanf("%u", &input)
+```
+
+Read the input as an unsigned integer.
+
+```asm
+0x080488ca <+112>:   movl   $0x1337d00d,0x4(%esp)       ← hardcoded constant
+0x080488d5 <+123>:   call   0x8048747 <test>             ← test(input, 0x1337d00d)
+```
+
+We can verify the constant in GDB:
+
+```
+(gdb) x/s 0x8048a85
+0x8048a85: "%u"
+(gdb) p/d 0x1337d00d
+$1 = 322424845
+```
+
+So `main` calls `test(input, 322424845)`.
 
 ---
 
-## Step 4: Disassemble `test`
+## Step 4: Disassemble `test` — understand the key derivation
 
 ```
 (gdb) disas test
 ```
 
-Key observations:
-- Computes `key = 0x1337d00d - input`
-- If `key` is between 0 and 21 (inclusive), enters a jump table where **every case** calls `decrypt(key)`
-- If `key > 21`, calls `decrypt(rand())` — a random value we can't control
+Key instructions:
 
-All 22 switch cases (0–21) do the same thing: call `decrypt(key)`. We need to find which key value produces the correct decryption.
+```asm
+804874d: mov    0x8(%ebp),%eax       ← load a (user input)
+8048750: mov    0xc(%ebp),%edx       ← load b (0x1337d00d)
+8048755: sub    %eax,%ecx            ← d = b - a
+804875c: cmpl   $0x15,-0xc(%ebp)     ← if d > 21...
+8048760: ja     804884a              ← ...jump to default (rand path)
+```
+
+If `d <= 21`, a **jump table** at `0x80489f0` is used:
+
+```asm
+8048766: mov    -0xc(%ebp),%eax      ← load d
+8048769: shl    $0x2,%eax            ← d * 4 (dword index)
+804876c: add    $0x80489f0,%eax      ← jump_table[d]
+8048773: jmp    *%eax                ← indirect jump
+```
+
+We can inspect the jump table in GDB:
+
+```
+(gdb) x/22xw 0x80489f0
+```
+
+All 22 entries (cases 0–21) lead to the same pattern: `decrypt(d)`.
+The default path calls `decrypt(rand())` — uncontrollable.
+
+So: **key = 0x1337d00d − input**, and key must be between 0 and 21.
 
 ---
 
-## Step 5: Disassemble `decrypt`
+## Step 5: Disassemble `decrypt` — find the encrypted buffer and target string
 
 ```
 (gdb) disas decrypt
 ```
 
-### The encrypted buffer
+### The encrypted buffer (built on the stack)
 
-The function builds a 16-byte string on the stack from 4 dwords:
+```asm
+0x08048673 <+19>:    movl   $0x757c7d51,-0x1d(%ebp)
+0x0804867a <+26>:    movl   $0x67667360,-0x19(%ebp)
+0x08048681 <+33>:    movl   $0x7b66737e,-0x15(%ebp)
+0x08048688 <+40>:    movl   $0x33617c7d,-0x11(%ebp)
+0x0804868f <+47>:    movb   $0x0,-0xd(%ebp)             ← NUL terminator
+```
+
+In memory order (little-endian dwords): `51 7d 7c 75 60 73 66 67 7e 73 66 7b 7d 7c 61 33 00`
+
+We can verify in GDB by setting a breakpoint inside `decrypt`:
 
 ```
-0x757c7d51  0x67667360  0x7b66737e  0x33617c7d
+(gdb) b *0x0804869c                                      ← after buffer is built
+(gdb) run
+Password:0
+(gdb) x/17bx $ebp-0x1d
+0x...: 0x51 0x7d 0x7c 0x75 0x60 0x73 0x66 0x67
+0x...: 0x7e 0x73 0x66 0x7b 0x7d 0x7c 0x61 0x33 0x00
 ```
-
-In memory order (little-endian): `51 7d 7c 75 60 73 66 67 7e 73 66 7b 7d 7c 61 33`
 
 ### The XOR decryption loop
 
-```c
-for (i = 0; i < strlen(buffer); i++)
-    buffer[i] ^= key;
+```asm
+0x080486cd <+109>:   movzbl (%eax),%eax               ← load buffer[i]
+0x080486d5 <+117>:   xor    %edx,%eax                 ← XOR with key (arg at 0x8(%ebp))
+0x080486df <+127>:   mov    %dl,(%eax)                 ← store back
+0x080486e1 <+129>:   addl   $0x1,-0x28(%ebp)           ← i++
+0x080486eb <+139>:   jb     0x80486c7                  ← loop while i < len
 ```
 
-### The comparison
+Equivalent C: `for (i = 0; i < 16; i++) buffer[i] ^= key;`
 
-The decrypted result is compared against `"Congratulations!"` (at address `0x80489c3`, 17 bytes including NUL). If they match → `system("/bin/sh")`. Otherwise → `puts("Nope")`.
+### The comparison target
+
+```asm
+0x080486f2 <+146>:   mov    $0x80489c3,%eax            ← address of expected string
+0x080486f7 <+151>:   mov    $0x11,%ecx                 ← compare 17 bytes (16 + NUL)
+0x08048700 <+160>:   repz cmpsb                        ← strncmp-style compare
+```
+
+We read the target string:
+
+```
+(gdb) x/s 0x80489c3
+0x80489c3: "Congratulations!"
+```
+
+And the success/failure paths:
+
+```
+(gdb) x/s 0x80489d4
+0x80489d4: "/bin/sh"                                    ← system() argument on match
+(gdb) x/s 0x80489dc
+0x80489dc: "Nope"                                       ← puts() on mismatch
+```
 
 ---
 
-## Step 6: Recover the XOR key
+## Step 6: Recover the XOR key (known-plaintext attack)
 
-We XOR the first encrypted byte with the first expected byte:
+We know:
+- **Ciphertext**: the encrypted buffer bytes
+- **Plaintext**: `"Congratulations!"` (the expected result)
+
+XOR is its own inverse: `key = ciphertext[i] ^ plaintext[i]`
 
 ```
-encrypted[0] = 0x51 ('Q')
-expected[0]  = 0x43 ('C')    ← first char of "Congratulations!"
+encrypted[0] = 0x51  ('Q')
+expected[0]  = 0x43  ('C')     ← first char of "Congratulations!"
 
 key = 0x51 ^ 0x43 = 0x12 = 18
 ```
 
-Verification with the second byte:
+Full XOR conversion table (all 16 bytes, key = 0x12 = 18):
 
 ```
-encrypted[1] = 0x7d
-expected[1]  = 0x6f ('o')
-
-0x7d ^ 0x12 = 0x6f  ✓
+index  encrypted  ^ key (0x12)  = decrypted  char
+─────  ─────────  ───────────   ──────────  ────
+ [0]     0x51     ^ 0x12        = 0x43       'C'
+ [1]     0x7d     ^ 0x12        = 0x6f       'o'
+ [2]     0x7c     ^ 0x12        = 0x6e       'n'
+ [3]     0x75     ^ 0x12        = 0x67       'g'
+ [4]     0x60     ^ 0x12        = 0x72       'r'
+ [5]     0x73     ^ 0x12        = 0x61       'a'
+ [6]     0x66     ^ 0x12        = 0x74       't'
+ [7]     0x67     ^ 0x12        = 0x75       'u'
+ [8]     0x7e     ^ 0x12        = 0x6c       'l'
+ [9]     0x73     ^ 0x12        = 0x61       'a'
+[10]     0x66     ^ 0x12        = 0x74       't'
+[11]     0x7b     ^ 0x12        = 0x69       'i'
+[12]     0x7d     ^ 0x12        = 0x6f       'o'
+[13]     0x7c     ^ 0x12        = 0x6e       'n'
+[14]     0x61     ^ 0x12        = 0x73       's'
+[15]     0x33     ^ 0x12        = 0x21       '!'
 ```
 
-The correct key is **18**.
+Result: `"Congratulations!"` — all 16 bytes match.
+
+The XOR key is **18** (0x12). Since 18 is between 0 and 21, it falls within the valid switch range.
 
 ---
 
@@ -118,7 +225,9 @@ The correct key is **18**.
 Since `key = 0x1337d00d - input`:
 
 ```
-input = 0x1337d00d - 18 = 322424845 - 18 = 322424827
+input = 0x1337d00d - 18
+      = 322424845  - 18
+      = 322424827
 ```
 
 ---
@@ -131,9 +240,11 @@ level03@OverRide:~$ ./level03
 *               level03         **
 ***********************************
 Password:322424827
+Congratulations!
 $ whoami
 level04
 $ cat /home/users/level04/.pass
+kgv3tkEb9h2mLkRsPkXRfc2mHbjMxQzvb2FrgKkf
 ```
 
 ---

