@@ -8,7 +8,7 @@ A binary exploitation project following RainFall. Each level is a setuid ELF bin
 
 ### Hardcoded Credentials
 Secrets embedded directly in the binary (constants in `cmp` instructions, strings in `.rodata`) are trivially recoverable via disassembly or `strings`. No memory corruption needed — the flaw is purely logical.
-> Level00, Level01, Level06
+> Level00, Level01
 
 ### Stack Buffer Overflow
 When a fixed-size stack buffer is written past its bounds (via `gets`, `fgets` with a larger size, etc.), the attacker controls saved EBP and EIP. Classic payloads: **ret2libc** (chain `system` + `exit` + `"/bin/sh"`) or **ROP** when the stack is non-executable.
