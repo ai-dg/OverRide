@@ -2,6 +2,8 @@
 
 A binary exploitation project following RainFall. Each level is a setuid ELF binary with a deliberate vulnerability — exploit it to read the next level's password.
 
+> Built with [Pierina Camarena](https://github.com/pierinacamarena).
+
 ---
 
 ## Key Concepts
